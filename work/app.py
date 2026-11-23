@@ -14,40 +14,41 @@ st.set_page_config(
 EXCEL_FILENAME = "262701_DQDLC_A_v003.xlsx"
 
 
-def find_excel_file(filename: str) -> Path | None:
+def resolve_excel_source(filename: str):
+    """Busca el archivo Excel en la carpeta de la app, raíz del repo o subcarpetas."""
+    if hasattr(filename, "read"):
+        return filename
+
     app_dir = Path(__file__).resolve().parent
     search_dirs = [
-        app_dir,               # /mount/src/2627_dqdlc_a/work
-        app_dir.parent,        # /mount/src/2627_dqdlc_a (raíz del repo)
-        app_dir.parent.parent, # /mount/src
+        app_dir,
+        app_dir.parent,
+        app_dir.parent.parent,
         Path.cwd(),
     ]
 
-    # 1. Buscar coincidencia exacta
-    for directory in search_dirs:
-        if directory.exists() and directory.is_dir():
-            target = directory / filename
-            if target.is_file():
-                return target
+    for folder in search_dirs:
+        if folder.exists() and folder.is_dir():
+            exact = folder / filename
+            if exact.is_file():
+                return str(exact)
 
-    # 2. Buscar cualquier .xlsx válido (útil si subes v004, v005, etc.)
-    for directory in search_dirs:
-        if directory.exists() and directory.is_dir():
-            candidates = sorted(
-                [p for p in directory.rglob("*.xlsx") if not p.name.startswith("~$")],
+    for folder in search_dirs:
+        if folder.exists() and folder.is_dir():
+            xlsx_files = sorted(
+                [p for p in folder.rglob("*.xlsx") if not p.name.startswith("~$")],
                 key=lambda p: p.stat().st_mtime,
                 reverse=True,
             )
-            if candidates:
-                return candidates[0]
+            if xlsx_files:
+                return str(xlsx_files[0])
 
     return None
 
 
 @st.cache_data(ttl=60)
-def load_league_data_from_source(source):
+def load_league_data(source):
     df_orig = pd.read_excel(source, sheet_name="Datos Originales", header=None)
-    # ... mantén exactamente aquí todo el procesamiento de df_orig ...
 
     managers = []
     pts_matrix = {}
@@ -59,7 +60,6 @@ def load_league_data_from_source(source):
         name = str(df_orig.iloc[5 + idx, 0]).strip()
         raw_pts = df_orig.iloc[5 + idx, 8:25].tolist()
 
-        # Considera jornada jugada si hay valor numérico no nulo
         played_pts = []
         round_labels = []
         for j_i, val in enumerate(raw_pts):
@@ -188,6 +188,19 @@ else:
     data_source = uploaded_file
 
 df_cls, df_pts_j, df_cap_j, df_ga_j, df_pac_j = load_league_data_from_source(data_source)
+
+source = resolve_excel_source(EXCEL_FILENAME)
+if source is None:
+    st.warning(
+        f"No se encontró `{EXCEL_FILENAME}` ni otro archivo `.xlsx` en el repositorio. "
+        "Sube el Excel aquí para cargarlo:"
+    )
+    uploaded = st.file_uploader("Sube el Excel (.xlsx)", type=["xlsx"])
+    if uploaded is None:
+        st.stop()
+    source = uploaded
+
+df_cls, df_pts_j, df_cap_j, df_ga_j, df_pac_j = load_league_data(source)
 
 df_cls, df_pts_j, df_cap_j, df_ga_j, df_pac_j = load_league_data(EXCEL_FILENAME)
 current_round = int(df_cls["Jornadas"].max())
