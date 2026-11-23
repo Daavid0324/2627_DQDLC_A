@@ -14,11 +14,8 @@ st.set_page_config(
 EXCEL_FILENAME = "262701_DQDLC_A_v003.xlsx"
 
 
-def resolve_excel_source(filename: str):
+def find_excel_file(filename: str) -> Path | None:
     """Busca el archivo Excel en la carpeta de la app, raíz del repo o subcarpetas."""
-    if hasattr(filename, "read"):
-        return filename
-
     app_dir = Path(__file__).resolve().parent
     search_dirs = [
         app_dir,
@@ -31,7 +28,7 @@ def resolve_excel_source(filename: str):
         if folder.exists() and folder.is_dir():
             exact = folder / filename
             if exact.is_file():
-                return str(exact)
+                return exact
 
     for folder in search_dirs:
         if folder.exists() and folder.is_dir():
@@ -41,7 +38,7 @@ def resolve_excel_source(filename: str):
                 reverse=True,
             )
             if xlsx_files:
-                return str(xlsx_files[0])
+                return xlsx_files[0]
 
     return None
 
@@ -174,38 +171,21 @@ with col_top_2:
         st.rerun()
 
 excel_path = find_excel_file(EXCEL_FILENAME)
-
 if excel_path is not None:
     data_source = str(excel_path)
 else:
     st.warning(
-        f"No se encontró `{EXCEL_FILENAME}` ni otro `.xlsx` en el repositorio (`work/` o raíz). "
-        "Sube el archivo Excel aquí para visualizarlo al instante:"
+        f"No se encontró `{EXCEL_FILENAME}` ni otro archivo `.xlsx` en el repositorio. "
+        "Sube el Excel aquí para cargarlo al instante:"
     )
-    uploaded_file = st.file_uploader("Sube el Excel de la liga (.xlsx)", type=["xlsx"])
+    uploaded_file = st.file_uploader("Sube el Excel (.xlsx)", type=["xlsx"])
     if uploaded_file is None:
         st.stop()
     data_source = uploaded_file
 
-df_cls, df_pts_j, df_cap_j, df_ga_j, df_pac_j = load_league_data_from_source(data_source)
-
-source = resolve_excel_source(EXCEL_FILENAME)
-if source is None:
-    st.warning(
-        f"No se encontró `{EXCEL_FILENAME}` ni otro archivo `.xlsx` en el repositorio. "
-        "Sube el Excel aquí para cargarlo:"
-    )
-    uploaded = st.file_uploader("Sube el Excel (.xlsx)", type=["xlsx"])
-    if uploaded is None:
-        st.stop()
-    source = uploaded
-
-df_cls, df_pts_j, df_cap_j, df_ga_j, df_pac_j = load_league_data(source)
-
-df_cls, df_pts_j, df_cap_j, df_ga_j, df_pac_j = load_league_data(EXCEL_FILENAME)
+df_cls, df_pts_j, df_cap_j, df_ga_j, df_pac_j = load_league_data(data_source)
 current_round = int(df_cls["Jornadas"].max())
 
-# Sidebar filters
 st.sidebar.header("Filtros de análisis")
 selected_managers = st.sidebar.multiselect(
     "Seleccionar mánagers",
@@ -224,7 +204,6 @@ selected_rounds = st.sidebar.multiselect(
 if not selected_rounds:
     selected_rounds = all_rounds
 
-# Top KPIs
 leader = df_cls.iloc[0]
 top_ga = df_cls.sort_values("G+A", ascending=False).iloc[0]
 most_consistent = df_cls.sort_values("CV", ascending=True).iloc[0]
