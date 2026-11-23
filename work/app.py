@@ -11,7 +11,7 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-EXCEL_FILENAME = r"C:\Users\dvalv\OneDrive\Documentos\DQLC\analisi\262701_DQDLC_A_v003.xlsx"
+EXCEL_FILENAME = "262701_DQDLC_A_v003.xlsx"
 
 
 @st.cache_data(ttl=60)
