@@ -1,11 +1,11 @@
+from pathlib import Path
 import numpy as np
 import pandas as pd
 import plotly.express as px
-import plotly.graph_objects as go
 import streamlit as st
 
 st.set_page_config(
-    page_title="Donqui League A — Analytics",
+    page_title="Donqui League — Analytics",
     page_icon="⚽",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -13,34 +13,41 @@ st.set_page_config(
 
 EXCEL_FILENAME = "262701_DQDLC_A_v003.xlsx"
 
-def resolve_excel_path(filename: str) -> Path:
-    base_dir = Path(__file__).resolve().parent
-    candidate_dirs = [base_dir, base_dir.parent, Path.cwd()]
 
-    # 1. Buscar nombre exacto en rutas habituales
-    for folder in candidate_dirs:
-        exact_path = folder / filename
-        if exact_path.exists() and exact_path.is_file():
-            return exact_path
+def find_excel_file(filename: str) -> Path | None:
+    app_dir = Path(__file__).resolve().parent
+    search_dirs = [
+        app_dir,               # /mount/src/2627_dqdlc_a/work
+        app_dir.parent,        # /mount/src/2627_dqdlc_a (raíz del repo)
+        app_dir.parent.parent, # /mount/src
+        Path.cwd(),
+    ]
 
-    # 2. Si el nombre cambió en el repo, tomar el primer .xlsx válido encontrado
-    for folder in candidate_dirs:
-        if folder.exists() and folder.is_dir():
-            xlsx_files = [
-                f for f in sorted(folder.glob("*.xlsx"))
-                if not f.name.startswith("~$")
-            ]
-            if xlsx_files:
-                return xlsx_files[0]
+    # 1. Buscar coincidencia exacta
+    for directory in search_dirs:
+        if directory.exists() and directory.is_dir():
+            target = directory / filename
+            if target.is_file():
+                return target
 
-    searched = "\n".join(f"- {d}" for d in candidate_dirs)
-    raise FileNotFoundError(
-        f"No se encontró '{filename}' ni ningún archivo .xlsx en:\n{searched}"
-    )
+    # 2. Buscar cualquier .xlsx válido (útil si subes v004, v005, etc.)
+    for directory in search_dirs:
+        if directory.exists() and directory.is_dir():
+            candidates = sorted(
+                [p for p in directory.rglob("*.xlsx") if not p.name.startswith("~$")],
+                key=lambda p: p.stat().st_mtime,
+                reverse=True,
+            )
+            if candidates:
+                return candidates[0]
+
+    return None
+
 
 @st.cache_data(ttl=60)
-def load_league_data(path: str):
-    df_orig = pd.read_excel(path, sheet_name="Datos Originales", header=None)
+def load_league_data_from_source(source):
+    df_orig = pd.read_excel(source, sheet_name="Datos Originales", header=None)
+    # ... mantén exactamente aquí todo el procesamiento de df_orig ...
 
     managers = []
     pts_matrix = {}
@@ -165,6 +172,22 @@ with col_top_2:
     if st.button("🔄 Actualizar", use_container_width=True):
         st.cache_data.clear()
         st.rerun()
+
+excel_path = find_excel_file(EXCEL_FILENAME)
+
+if excel_path is not None:
+    data_source = str(excel_path)
+else:
+    st.warning(
+        f"No se encontró `{EXCEL_FILENAME}` ni otro `.xlsx` en el repositorio (`work/` o raíz). "
+        "Sube el archivo Excel aquí para visualizarlo al instante:"
+    )
+    uploaded_file = st.file_uploader("Sube el Excel de la liga (.xlsx)", type=["xlsx"])
+    if uploaded_file is None:
+        st.stop()
+    data_source = uploaded_file
+
+df_cls, df_pts_j, df_cap_j, df_ga_j, df_pac_j = load_league_data_from_source(data_source)
 
 df_cls, df_pts_j, df_cap_j, df_ga_j, df_pac_j = load_league_data(EXCEL_FILENAME)
 current_round = int(df_cls["Jornadas"].max())
