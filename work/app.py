@@ -13,6 +13,30 @@ st.set_page_config(
 
 EXCEL_FILENAME = "262701_DQDLC_A_v003.xlsx"
 
+def resolve_excel_path(filename: str) -> Path:
+    base_dir = Path(__file__).resolve().parent
+    candidate_dirs = [base_dir, base_dir.parent, Path.cwd()]
+
+    # 1. Buscar nombre exacto en rutas habituales
+    for folder in candidate_dirs:
+        exact_path = folder / filename
+        if exact_path.exists() and exact_path.is_file():
+            return exact_path
+
+    # 2. Si el nombre cambió en el repo, tomar el primer .xlsx válido encontrado
+    for folder in candidate_dirs:
+        if folder.exists() and folder.is_dir():
+            xlsx_files = [
+                f for f in sorted(folder.glob("*.xlsx"))
+                if not f.name.startswith("~$")
+            ]
+            if xlsx_files:
+                return xlsx_files[0]
+
+    searched = "\n".join(f"- {d}" for d in candidate_dirs)
+    raise FileNotFoundError(
+        f"No se encontró '{filename}' ni ningún archivo .xlsx en:\n{searched}"
+    )
 
 @st.cache_data(ttl=60)
 def load_league_data(path: str):
