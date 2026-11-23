@@ -257,8 +257,12 @@ with tab1:
 
 with tab2:
     sub_pts = df_pts_j.loc[selected_managers, selected_rounds]
-    df_melt = sub_pts.reset_index().melt(id_vars="index", var_name="Jornada", value_name="Puntos")
-    df_melt.rename(columns={"index": "Mánager"}, inplace=True)
+    df_melt = sub_pts.reset_index().melt(
+        id_vars=sub_pts.index.name or "Mánager",
+        var_name="Jornada",
+        value_name="Puntos",
+    )
+    df_melt.rename(columns={sub_pts.index.name or "Mánager": "Mánager"}, inplace=True)
 
     fig_line = px.line(
         df_melt,
