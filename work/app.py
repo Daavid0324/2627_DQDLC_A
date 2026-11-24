@@ -134,14 +134,20 @@ def _parse_round_header(text: str) -> tuple[str, str] | None:
     return None
 
 
-def _extract_managers_summaries(df_mgr_sheet: pd.DataFrame, fallback_round: int) -> dict[str, dict[str, str]]:
+def _extract_managers_summaries(
+    df_mgr_sheet: pd.DataFrame,
+    fallback_round: int,
+    known_managers: list[str] | None = None,
+) -> dict[str, dict[str, str]]:
     """
-    Lee resúmenes por jornada y mánager desde la hoja 'Mánagers' del Excel:
-    - Columna A: encabezado de jornada (ej. 'JORNADA 13') o nombre del mánager.
-    - Columna B: texto del resumen del mánager.
+    Lee resúmenes por jornada y mánager desde la hoja 'Mánagers' del Excel,
+    soportando tanto:
+    - Columna A con encabezado ('JORNADA 13') y celdas 'Mánager: texto...'
+    - Como Columna A = Mánager y Columna B = texto.
     """
     summaries_by_round: dict[str, dict[str, str]] = {}
     current_rk = f"J{max(1, fallback_round)}"
+    known_map = {_norm_key(m): m for m in (known_managers or [])}
 
     for r_i in range(len(df_mgr_sheet)):
         row_vals = [
@@ -154,16 +160,36 @@ def _extract_managers_summaries(df_mgr_sheet: pd.DataFrame, fallback_round: int)
 
         first_cell = row_vals[0]
         hdr = _parse_round_header(first_cell)
-        if hdr and len(row_vals) == 1:
+        if hdr:
             current_rk = hdr[0]
             summaries_by_round.setdefault(current_rk, {})
             continue
 
+        # Caso 1: Nombre en columna A y texto en columna B+
         if len(row_vals) >= 2:
             mgr_name = row_vals[0]
             summary_text = " ".join(row_vals[1:]).strip()
-            if mgr_name and summary_text:
-                summaries_by_round.setdefault(current_rk, {})[mgr_name] = summary_text
+            canon = known_map.get(_norm_key(mgr_name), mgr_name)
+            if canon and summary_text:
+                summaries_by_round.setdefault(current_rk, {})[canon] = summary_text
+            continue
+
+        # Caso 2: Todo en una sola celda en columna A ("Nombre: ...")
+        m_colon = re.match(r"^([^:]+):\s*(.+)$", first_cell, flags=re.DOTALL)
+        if m_colon:
+            cand_raw = m_colon.group(1).strip()
+            cand_key = _norm_key(cand_raw)
+            canon = known_map.get(cand_key, cand_raw)
+            body = m_colon.group(2).strip()
+            if canon and body:
+                summaries_by_round.setdefault(current_rk, {})[canon] = body
+                continue
+
+        # Caso 3: Celda en columna A que empieza por el nombre del mánager
+        for k_norm, canon in known_map.items():
+            if _norm_key(first_cell).startswith(k_norm + " "):
+                summaries_by_round.setdefault(current_rk, {})[canon] = first_cell
+                break
 
     return summaries_by_round
 
@@ -215,6 +241,16 @@ def load_league_data(source_key: str, file_bytes: bytes):
 
     orig_sheet = _find_sheet_name(sheet_names, "Datos Originales") or "Datos Originales"
     df_orig = pd.read_excel(bio, sheet_name=orig_sheet, header=None)
+
+    mgr_sheet_name = _find_sheet_name(sheet_names, "Mánagers")
+    if mgr_sheet_name:
+        bio.seek(0)
+        df_mgr_sheet = pd.read_excel(bio, sheet_name=mgr_sheet_name, header=None)
+        summaries_by_round = _extract_managers_summaries(
+            df_mgr_sheet,
+            max_j_played,
+            known_managers=managers,
+        )
 
     cap_extra: dict[str, dict] = {}
     cap_sheet_name = _find_sheet_name(sheet_names, "Capitanes")
