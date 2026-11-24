@@ -94,6 +94,21 @@ def _is_valid_number(val) -> bool:
     s = str(val).strip()
     return s != "" and s.lower() not in {"nan", "none", "null", "n/a", "-", "—"}
 
+def _split_summary_and_fact(text: str) -> tuple[str, str]:
+    """Separa el resumen principal del 'Dato curioso:' si existe."""
+    parts = re.split(r"\bDato curioso:\s*", text.strip(), maxsplit=1, flags=re.IGNORECASE)
+    main_txt = parts[0].strip().rstrip(" .") + "." if parts[0].strip() else ""
+    fact_txt = parts[1].strip() if len(parts) > 1 else ""
+    return main_txt, fact_txt
+
+
+def _clean_lead_name(manager_name: str, text: str) -> str:
+    """Evita repetir '**Nombre:** Nombre (...)' si el texto ya comienza con el nombre."""
+    pattern = rf"^\s*{re.escape(manager_name)}\s*(?::|\s+\()"
+    if re.match(pattern, text, flags=re.IGNORECASE):
+        if re.match(rf"^\s*{re.escape(manager_name)}\s*:", text, flags=re.IGNORECASE):
+            return re.sub(rf"^\s*{re.escape(manager_name)}\s*:\s*", "", text, count=1, flags=re.IGNORECASE).strip()
+    return text.strip()
 
 def _safe_float(val, default: float = 0.0) -> float:
     if not _is_valid_number(val):
@@ -733,38 +748,62 @@ with tab_mgr:
 
 # 6. RESÚMENES POR JORNADA
 with tab_res:
-    st.subheader("Resúmenes por jornada (hoja 'Mánagers' del Excel)")
-    st.caption(
-        "Se leen directamente desde la hoja **Mánagers** del archivo Excel. "
-        "A medida que vayas añadiendo resúmenes de nuevas jornadas en esa hoja, aparecerán aquí automáticamente."
-    )
+    st.subheader("Resúmenes por jornada")
+    st.caption("Lectura limpia desde la hoja **Mánagers** del Excel.")
 
     ordered_rounds_all = sorted(
         summaries_by_round.keys(),
         key=lambda x: int(_round_num_str(x)) if _round_num_str(x).isdigit() else 0,
     )
 
-    if ordered_rounds_all:
-        selected_sum_round = st.selectbox(
-            "Jornada a consultar",
-            options=ordered_rounds_all,
-            index=len(ordered_rounds_all) - 1,
-            format_func=lambda rk: f"JORNADA {_round_num_str(rk)}",
-        )
+    if not ordered_rounds_all:
+        st.info("No se encontraron resúmenes en la hoja 'Mánagers' del Excel.")
+    else:
+        f_col1, f_col2, f_col3 = st.columns([2, 2, 1.5])
+        with f_col1:
+            selected_sum_round = st.selectbox(
+                "Jornada",
+                options=ordered_rounds_all,
+                index=len(ordered_rounds_all) - 1,
+                format_func=lambda rk: f"JORNADA {_round_num_str(rk)}",
+            )
+        with f_col2:
+            search_q = st.text_input(
+                "Filtrar por mánager o texto",
+                placeholder="Ej. Donqui, capitán, J11...",
+            ).strip().casefold()
+        with f_col3:
+            st.write("")
+            st.write("")
+            show_facts = st.toggle("Mostrar dato curioso", value=True)
+
         mgr_map = summaries_by_round.get(selected_sum_round, {})
         mgr_map_norm = {_strip_accents(k).strip().casefold(): v for k, v in mgr_map.items()}
 
-        shown = 0
+        items_to_show: list[tuple[str, str]] = []
         for m_name in all_managers:
-            if m_name in active_managers:
-                txt = mgr_map.get(m_name) or mgr_map_norm.get(_strip_accents(m_name).strip().casefold())
-                if txt:
-                    st.markdown(f"**{m_name}:** {txt}")
-                    shown += 1
+            if m_name not in active_managers:
+                continue
+            raw_txt = mgr_map.get(m_name) or mgr_map_norm.get(_strip_accents(m_name).strip().casefold())
+            if not raw_txt:
+                continue
+            clean_txt = _clean_lead_name(m_name, raw_txt)
+            if search_q and search_q not in m_name.casefold() and search_q not in clean_txt.casefold():
+                continue
+            items_to_show.append((m_name, clean_txt))
 
-        if shown == 0:
+        if not items_to_show:
             st.info(
-                f"No hay resúmenes para los mánagers seleccionados en **JORNADA {_round_num_str(selected_sum_round)}**."
+                f"No hay resúmenes que coincidan con el filtro en **JORNADA {_round_num_str(selected_sum_round)}**."
             )
-    else:
-        st.info("No se encontraron resúmenes en la hoja 'Mánagers' del Excel.")
+        else:
+            st.caption(f"Mostrando {len(items_to_show)} mánagers en **JORNADA {_round_num_str(selected_sum_round)}**.")
+            grid_cols = st.columns(2)
+            for idx, (m_name, clean_txt) in enumerate(items_to_show):
+                main_txt, fact_txt = _split_summary_and_fact(clean_txt)
+                with grid_cols[idx % 2]:
+                    with st.container(border=True):
+                        st.markdown(f"#### {m_name}")
+                        st.markdown(main_txt)
+                        if show_facts and fact_txt:
+                            st.caption(f"💡 *Dato curioso:* {fact_txt}")
