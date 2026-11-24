@@ -95,6 +95,11 @@ def _safe_int(val, default: int = 0) -> int:
     return int(round(f))
 
 
+def _round_num_str(rk: str) -> str:
+    digits = re.sub(r"\D", "", str(rk))
+    return digits or str(rk)
+
+
 def _parse_round_header(text: str) -> tuple[str, str] | None:
     """Detecta encabezados tipo 'JORNADA 13', 'Jornada 14' o 'J13'."""
     s = str(text).strip()
@@ -124,14 +129,12 @@ def _extract_managers_summaries(df_mgr_sheet: pd.DataFrame, fallback_round: int)
         if not c0_str and not c1_str:
             continue
 
-        # ¿Es un encabezado de jornada?
         hdr = _parse_round_header(c0_str) if c0_str else None
         if hdr and not c1_str:
             current_rk = hdr[0]
             summaries_by_round.setdefault(current_rk, {})
             continue
 
-        # Fila de mánager + resumen
         if c0_str and c1_str:
             summaries_by_round.setdefault(current_rk, {})[c0_str] = c1_str
 
@@ -528,201 +531,3 @@ with tab_vis:
 with tab_evo:
     sub_pts = df_pts_j.loc[active_managers, active_rounds]
     df_melt = sub_pts.reset_index().melt(
-        id_vars="Mánager",
-        var_name="Jornada",
-        value_name="Puntos",
-    )
-
-    fig_line = px.line(
-        df_melt,
-        x="Jornada",
-        y="Puntos",
-        color="Mánager",
-        markers=True,
-        title="Puntuación por Jornada",
-    )
-    fig_line.update_layout(height=420, hovermode="x unified")
-    st.plotly_chart(fig_line, width="stretch")
-
-    fig_heat = px.imshow(
-        sub_pts,
-        text_auto=True,
-        aspect="auto",
-        color_continuous_scale="Blues",
-        title="Mapa de Calor de Puntos por Jornada",
-    )
-    fig_heat.update_layout(height=380)
-    st.plotly_chart(fig_heat, width="stretch")
-
-# 3. REGULARIDAD Y CAPITÁN
-with tab_reg:
-    deep_cols = [
-        "Pos",
-        "Mánager",
-        "Media / J",
-        "Mediana / J",
-        "DE",
-        "CV",
-        "Últ. 3J",
-        "Bonus Cap.",
-        "Sin Cap.",
-        "Mult. Promedio",
-        "Veces x3",
-        "Cap. Top (≥5)",
-        "Pts / (G+A)",
-        "Victorias J",
-        "Top 3 J",
-    ]
-    view_deep = df_cls[df_cls["Mánager"].isin(active_managers)][deep_cols]
-    st.dataframe(view_deep, width="stretch", hide_index=True)
-
-    r_left, r_right = st.columns(2)
-    with r_left:
-        fig_scatter = px.scatter(
-            view_deep,
-            x="Media / J",
-            y="CV",
-            size="Top 3 J",
-            color="Mánager",
-            text="Mánager",
-            title="Regularidad (CV) vs. Media por Jornada",
-            labels={"CV": "Coeficiente de Variación (menor = más regular)"},
-        )
-        fig_scatter.update_traces(textposition="top center")
-        fig_scatter.update_layout(height=400, showlegend=False, margin=dict(l=10, r=20, t=45, b=10))
-        st.plotly_chart(fig_scatter, width="stretch")
-
-    with r_right:
-        cap_df = view_deep.sort_values("Bonus Cap.", ascending=True)
-        fig_cap = px.bar(
-            cap_df,
-            x="Bonus Cap.",
-            y="Mánager",
-            orientation="h",
-            text="Bonus Cap.",
-            title="Bonus Neto de Capitán por Mánager",
-        )
-        fig_cap.update_traces(textposition="outside", cliponaxis=False)
-        fig_cap.update_layout(height=400, margin=dict(l=10, r=45, t=45, b=10))
-        st.plotly_chart(fig_cap, width="stretch")
-
-# 4. PROYECCIÓN J17
-with tab_proj:
-    if rem_rounds == 0:
-        st.info(f"Se han completado las {TOTAL_ROUNDS} jornadas; las proyecciones coinciden con los puntos finales.")
-
-    view_proj = df_cls[df_cls["Mánager"].isin(active_managers)].copy()
-    proj_long = view_proj.melt(
-        id_vars=["Mánager"],
-        value_vars=["Puntos Totales", "Proy. Media J17", "Proy. Forma J17"],
-        var_name="Escenario",
-        value_name="Puntos",
-    )
-    fig_proj = px.bar(
-        proj_long,
-        x="Mánager",
-        y="Puntos",
-        color="Escenario",
-        barmode="group",
-        text_auto=True,
-        title="Puntos Actuales vs. Proyección a J17 (Media vs. Últimas 3 Jornadas)",
-    )
-    fig_proj.update_layout(height=450, xaxis_tickangle=-25)
-    st.plotly_chart(fig_proj, width="stretch")
-
-    st.dataframe(
-        view_proj[
-            ["Pos", "Mánager", "Puntos Totales", "Media / J", "Últ. 3J", "Proy. Media J17", "Proy. Forma J17"]
-        ],
-        width="stretch",
-        hide_index=True,
-    )
-
-# 5. FICHA POR MÁNAGER (Integra resumen leído desde el Excel)
-with tab_mgr:
-    chosen = st.selectbox("Elige un mánager", options=all_managers)
-    row = df_cls[df_cls["Mánager"] == chosen].iloc[0]
-
-    ordered_summary_rounds = sorted(
-        [rk for rk, m_map in summaries_by_round.items() if chosen in m_map],
-        key=lambda x: int(re.sub(r"\D", "", x) or 0),
-    )
-
-    if ordered_summary_rounds:
-        last_rk = ordered_summary_rounds[-1]
-        st.markdown(f"### 🗞️ Resumen — {chosen} (JORNADA {re.sub(r'\\D', '', last_rk)})")
-        st.info(summaries_by_round[last_rk][chosen])
-
-        if len(ordered_summary_rounds) > 1:
-            with st.expander(f"Evolución en la hoja 'Mánagers' para {chosen} ({len(ordered_summary_rounds)} jornadas)"):
-                for rk in reversed(ordered_summary_rounds):
-                    st.markdown(f"**JORNADA {re.sub(r'\\D', '', rk)}:** {summaries_by_round[rk][chosen]}")
-    else:
-        st.caption(f"No hay resumen en la hoja 'Mánagers' del Excel para **{chosen}**.")
-
-    m1, m2, m3, m4, m5, m6 = st.columns(6)
-    m1.metric("Puesto", f"#{int(row['Pos'])}")
-    m2.metric("Puntos Totales", f"{int(row['Puntos Totales'])}")
-    m3.metric("Media / Mediana", f"{row['Media / J']} / {row['Mediana / J']}")
-    m4.metric("Últ. 3J (Forma)", f"{row['Últ. 3J']}")
-    m5.metric("G+A / PaC", f"{int(row['G+A'])} / {int(row['PaC'])}")
-    m6.metric("Pos. Media / Top 3", f"{row['Pos. Media']} / {int(row['Top 3 J'])}")
-
-    r_cols = st.columns(3)
-    with r_cols[0]:
-        s_pts = df_pts_j.loc[chosen, active_rounds].rename("Puntos")
-        fig_m = px.bar(s_pts, x=s_pts.index, y="Puntos", text_auto=True, title=f"Puntos por jornada — {chosen}")
-        fig_m.update_layout(height=300, showlegend=False)
-        st.plotly_chart(fig_m, width="stretch")
-
-    with r_cols[1]:
-        s_cap = df_cap_j.loc[chosen, active_rounds].rename("Capitán")
-        fig_c = px.bar(
-            s_cap,
-            x=s_cap.index,
-            y="Capitán",
-            text_auto=True,
-            title=f"Puntos capitán — {chosen}",
-            color_discrete_sequence=["#0F766E"],
-        )
-        fig_c.update_layout(height=300, showlegend=False)
-        st.plotly_chart(fig_c, width="stretch")
-
-    with r_cols[2]:
-        df_of = pd.DataFrame(
-            {
-                "G+A": df_ga_j.loc[chosen, active_rounds],
-                "PaC": df_pac_j.loc[chosen, active_rounds],
-            }
-        )
-        fig_o = px.bar(df_of, x=df_of.index, y=["G+A", "PaC"], barmode="group", title=f"Ofensiva (G+A) y PaC — {chosen}")
-        fig_o.update_layout(height=300)
-        st.plotly_chart(fig_o, width="stretch")
-
-# 6. RESÚMENES POR JORNADA (Directamente desde la hoja 'Mánagers' del Excel)
-with tab_res:
-    st.subheader("Resúmenes por jornada (hoja 'Mánagers' del Excel)")
-    st.caption(
-        "Se leen directamente desde la hoja **Mánagers** del archivo Excel. "
-        "A medida que vayas añadiendo resúmenes de nuevas jornadas en esa hoja, aparecerán aquí automáticamente."
-    )
-
-    ordered_rounds_all = sorted(
-        summaries_by_round.keys(),
-        key=lambda x: int(re.sub(r"\D", "", x) or 0),
-    )
-
-    if ordered_rounds_all:
-        selected_sum_round = st.selectbox(
-            "Jornada a consultar",
-            options=ordered_rounds_all,
-            index=len(ordered_rounds_all) - 1,
-            format_func=lambda rk: f"JORNADA {re.sub(r'\\D', '', rk)}",
-        )
-        mgr_map = summaries_by_round.get(selected_sum_round, {})
-
-        for m_name in all_managers:
-            if m_name in active_managers and m_name in mgr_map:
-                st.markdown(f"**{m_name}:** {mgr_map[m_name]}")
-    else:
-        st.info("No se encontraron resúmenes en la hoja 'Mánagers' del Excel.")
