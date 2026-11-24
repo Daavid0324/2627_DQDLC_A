@@ -1,6 +1,7 @@
 from io import BytesIO
 from pathlib import Path
 import re
+import unicodedata
 import numpy as np
 import pandas as pd
 import plotly.express as px
@@ -29,6 +30,24 @@ COL_ROUNDS_START = 8
 COL_ROUNDS_END = 25  # slice [8:25] -> 17 jornadas
 
 APP_DIR = Path(__file__).resolve().parent
+
+
+def _strip_accents(text: str) -> str:
+    return "".join(
+        ch for ch in unicodedata.normalize("NFKD", str(text))
+        if not unicodedata.combining(ch)
+    )
+
+
+def _find_sheet_name(sheet_names: list[str], target: str) -> str | None:
+    target_norm = _strip_accents(target).strip().casefold()
+    for name in sheet_names:
+        if name.strip().casefold() == target.strip().casefold():
+            return name
+    for name in sheet_names:
+        if _strip_accents(name).strip().casefold() == target_norm:
+            return name
+    return None
 
 
 def find_excel_file(filename: str) -> Path | None:
@@ -102,7 +121,7 @@ def _round_num_str(rk: str) -> str:
 
 def _parse_round_header(text: str) -> tuple[str, str] | None:
     """Detecta encabezados tipo 'JORNADA 13', 'Jornada 14' o 'J13'."""
-    s = str(text).strip()
+    s = _strip_accents(str(text)).strip()
     m = re.fullmatch(r"(?:jornada|j)\s*(\d{1,2})", s, flags=re.IGNORECASE)
     if m:
         num = int(m.group(1))
@@ -112,9 +131,9 @@ def _parse_round_header(text: str) -> tuple[str, str] | None:
 
 def _extract_managers_summaries(df_mgr_sheet: pd.DataFrame, fallback_round: int) -> dict[str, dict[str, str]]:
     """
-    Extrae resúmenes por jornada y mánager directamente desde la hoja 'Mánagers' del Excel.
-    Soporta tanto un único bloque (ej. 'JORNADA 13' arriba) como múltiples bloques de jornada.
-    Retorna: { "J13": { "Donqui": "...", ... }, ... }
+    Lee resúmenes por jornada y mánager desde la hoja 'Mánagers' del Excel:
+    - Columna A: encabezado de jornada (ej. 'JORNADA 13') o nombre del mánager.
+    - Columna B: texto del resumen del mánager.
     """
     summaries_by_round: dict[str, dict[str, str]] = {}
     current_rk = f"J{max(1, fallback_round)}"
@@ -147,12 +166,14 @@ def load_league_data(source_key: str, file_bytes: bytes):
     xls = pd.ExcelFile(bio)
     sheet_names = xls.sheet_names
 
-    df_orig = pd.read_excel(bio, sheet_name="Datos Originales", header=None)
+    orig_sheet = _find_sheet_name(sheet_names, "Datos Originales") or "Datos Originales"
+    df_orig = pd.read_excel(bio, sheet_name=orig_sheet, header=None)
 
     cap_extra: dict[str, dict] = {}
-    if "Capitanes" in sheet_names:
+    cap_sheet_name = _find_sheet_name(sheet_names, "Capitanes")
+    if cap_sheet_name:
         bio.seek(0)
-        df_cap_sheet = pd.read_excel(bio, sheet_name="Capitanes", header=None)
+        df_cap_sheet = pd.read_excel(bio, sheet_name=cap_sheet_name, header=None)
         for r_i in range(16, min(len(df_cap_sheet), 35)):
             m_raw = df_cap_sheet.iloc[r_i, 0]
             if pd.notna(m_raw) and str(m_raw).strip():
@@ -310,9 +331,10 @@ def load_league_data(source_key: str, file_bytes: bytes):
     max_j_played = int(df_cls["Jornadas"].max()) if not df_cls.empty else 1
     summaries_by_round: dict[str, dict[str, str]] = {}
 
-    if "Mánagers" in sheet_names:
+    mgr_sheet_name = _find_sheet_name(sheet_names, "Mánagers")
+    if mgr_sheet_name:
         bio.seek(0)
-        df_mgr_sheet = pd.read_excel(bio, sheet_name="Mánagers", header=None)
+        df_mgr_sheet = pd.read_excel(bio, sheet_name=mgr_sheet_name, header=None)
         summaries_by_round = _extract_managers_summaries(df_mgr_sheet, max_j_played)
 
     return df_cls, df_pts_j, df_cap_j, df_ga_j, df_pac_j, summaries_by_round
@@ -645,27 +667,27 @@ with tab_proj:
 with tab_mgr:
     chosen = st.selectbox("Elige un mánager", options=all_managers)
     row = df_cls[df_cls["Mánager"] == chosen].iloc[0]
-    chosen_norm = chosen.strip().casefold()
+    chosen_norm = _strip_accents(chosen).strip().casefold()
 
     ordered_summary_rounds = sorted(
         [
             rk
             for rk, m_map in summaries_by_round.items()
-            if any(k.strip().casefold() == chosen_norm and v.strip() for k, v in m_map.items())
+            if any(_strip_accents(k).strip().casefold() == chosen_norm and v.strip() for k, v in m_map.items())
         ],
         key=lambda x: int(_round_num_str(x)) if _round_num_str(x).isdigit() else 0,
     )
 
     if ordered_summary_rounds:
         last_rk = ordered_summary_rounds[-1]
-        last_map = {k.strip().casefold(): v for k, v in summaries_by_round[last_rk].items()}
+        last_map = {_strip_accents(k).strip().casefold(): v for k, v in summaries_by_round[last_rk].items()}
         st.markdown(f"### 🗞️ Resumen — {chosen} (JORNADA {_round_num_str(last_rk)})")
         st.info(last_map[chosen_norm])
 
         if len(ordered_summary_rounds) > 1:
             with st.expander(f"Evolución en la hoja 'Mánagers' para {chosen} ({len(ordered_summary_rounds)} jornadas)"):
                 for rk in reversed(ordered_summary_rounds):
-                    rk_map = {k.strip().casefold(): v for k, v in summaries_by_round[rk].items()}
+                    rk_map = {_strip_accents(k).strip().casefold(): v for k, v in summaries_by_round[rk].items()}
                     st.markdown(f"**JORNADA {_round_num_str(rk)}:** {rk_map[chosen_norm]}")
     else:
         st.caption(f"No hay resumen en la hoja 'Mánagers' del Excel para **{chosen}**.")
@@ -730,12 +752,12 @@ with tab_res:
             format_func=lambda rk: f"JORNADA {_round_num_str(rk)}",
         )
         mgr_map = summaries_by_round.get(selected_sum_round, {})
-        mgr_map_norm = {k.strip().casefold(): v for k, v in mgr_map.items()}
+        mgr_map_norm = {_strip_accents(k).strip().casefold(): v for k, v in mgr_map.items()}
 
         shown = 0
         for m_name in all_managers:
             if m_name in active_managers:
-                txt = mgr_map.get(m_name) or mgr_map_norm.get(m_name.strip().casefold())
+                txt = mgr_map.get(m_name) or mgr_map_norm.get(_strip_accents(m_name).strip().casefold())
                 if txt:
                     st.markdown(f"**{m_name}:** {txt}")
                     shown += 1
