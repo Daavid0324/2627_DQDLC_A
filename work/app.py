@@ -39,13 +39,18 @@ def _strip_accents(text: str) -> str:
     )
 
 
+def _norm_key(text: str) -> str:
+    s = _strip_accents(str(text))
+    return " ".join(s.strip().lower().split())
+
+
 def _find_sheet_name(sheet_names: list[str], target: str) -> str | None:
-    target_norm = _strip_accents(target).strip().casefold()
+    target_norm = _norm_key(target)
     for name in sheet_names:
         if name.strip().casefold() == target.strip().casefold():
             return name
     for name in sheet_names:
-        if _strip_accents(name).strip().casefold() == target_norm:
+        if _norm_key(name) == target_norm:
             return name
     return None
 
@@ -94,21 +99,6 @@ def _is_valid_number(val) -> bool:
     s = str(val).strip()
     return s != "" and s.lower() not in {"nan", "none", "null", "n/a", "-", "—"}
 
-def _split_summary_and_fact(text: str) -> tuple[str, str]:
-    """Separa el resumen principal del 'Dato curioso:' si existe."""
-    parts = re.split(r"\bDato curioso:\s*", text.strip(), maxsplit=1, flags=re.IGNORECASE)
-    main_txt = parts[0].strip().rstrip(" .") + "." if parts[0].strip() else ""
-    fact_txt = parts[1].strip() if len(parts) > 1 else ""
-    return main_txt, fact_txt
-
-
-def _clean_lead_name(manager_name: str, text: str) -> str:
-    """Evita repetir '**Nombre:** Nombre (...)' si el texto ya comienza con el nombre."""
-    pattern = rf"^\s*{re.escape(manager_name)}\s*(?::|\s+\()"
-    if re.match(pattern, text, flags=re.IGNORECASE):
-        if re.match(rf"^\s*{re.escape(manager_name)}\s*:", text, flags=re.IGNORECASE):
-            return re.sub(rf"^\s*{re.escape(manager_name)}\s*:\s*", "", text, count=1, flags=re.IGNORECASE).strip()
-    return text.strip()
 
 def _safe_float(val, default: float = 0.0) -> float:
     if not _is_valid_number(val):
@@ -154,25 +144,67 @@ def _extract_managers_summaries(df_mgr_sheet: pd.DataFrame, fallback_round: int)
     current_rk = f"J{max(1, fallback_round)}"
 
     for r_i in range(len(df_mgr_sheet)):
-        c0 = df_mgr_sheet.iloc[r_i, 0] if df_mgr_sheet.shape[1] > 0 else None
-        c1 = df_mgr_sheet.iloc[r_i, 1] if df_mgr_sheet.shape[1] > 1 else None
-
-        c0_str = str(c0).strip() if pd.notna(c0) else ""
-        c1_str = str(c1).strip() if pd.notna(c1) else ""
-
-        if not c0_str and not c1_str:
+        row_vals = [
+            str(df_mgr_sheet.iloc[r_i, c_idx]).strip()
+            for c_idx in range(df_mgr_sheet.shape[1])
+            if pd.notna(df_mgr_sheet.iloc[r_i, c_idx]) and str(df_mgr_sheet.iloc[r_i, c_idx]).strip()
+        ]
+        if not row_vals:
             continue
 
-        hdr = _parse_round_header(c0_str) if c0_str else None
-        if hdr and not c1_str:
+        first_cell = row_vals[0]
+        hdr = _parse_round_header(first_cell)
+        if hdr and len(row_vals) == 1:
             current_rk = hdr[0]
             summaries_by_round.setdefault(current_rk, {})
             continue
 
-        if c0_str and c1_str:
-            summaries_by_round.setdefault(current_rk, {})[c0_str] = c1_str
+        if len(row_vals) >= 2:
+            mgr_name = row_vals[0]
+            summary_text = " ".join(row_vals[1:]).strip()
+            if mgr_name and summary_text:
+                summaries_by_round.setdefault(current_rk, {})[mgr_name] = summary_text
 
     return summaries_by_round
+
+
+def _split_summary_and_fact(text: str) -> tuple[str, str]:
+    """Separa el resumen principal del 'Dato curioso:' si existe."""
+    parts = re.split(r"\bDato curioso:\s*", text.strip(), maxsplit=1, flags=re.IGNORECASE)
+    main_txt = parts[0].strip().rstrip(" .") + "." if parts[0].strip() else ""
+    fact_txt = parts[1].strip() if len(parts) > 1 else ""
+    return main_txt, fact_txt
+
+
+def _clean_lead_name(manager_name: str, text: str) -> str:
+    """Evita repetir '**Nombre:** Nombre (...)' si el texto ya comienza con el nombre."""
+    if re.match(rf"^\s*{re.escape(manager_name)}\s*:", text, flags=re.IGNORECASE):
+        return re.sub(
+            rf"^\s*{re.escape(manager_name)}\s*:\s*",
+            "",
+            text,
+            count=1,
+            flags=re.IGNORECASE,
+        ).strip()
+    return text.strip()
+
+
+def _apply_clean_layout(
+    fig: go.Figure,
+    height: int = 400,
+    title: str | None = None,
+    top_margin: int = 55,
+    right_margin: int = 25,
+) -> go.Figure:
+    """Aplica márgenes, tamaños de fuente y alineación homogéneos a los gráficos."""
+    if title is not None:
+        fig.update_layout(title=dict(text=title, font=dict(size=15)))
+    fig.update_layout(
+        height=height,
+        margin=dict(l=20, r=right_margin, t=top_margin, b=20),
+        font=dict(size=12),
+    )
+    return fig
 
 
 @st.cache_data(show_spinner="Cargando datos de Donqui League...")
@@ -525,11 +557,22 @@ with tab_vis:
             color_continuous_scale="Tealgrn",
             title=f"Puntos Totales (J1–J{current_round})",
         )
-        fig_bar.update_traces(textposition="outside", cliponaxis=False)
+        fig_bar.update_traces(
+            textposition="outside",
+            textfont=dict(size=12),
+            cliponaxis=False,
+        )
+        _apply_clean_layout(
+            fig_bar,
+            height=410,
+            title=f"Puntos Totales (J1–J{current_round})",
+            top_margin=55,
+            right_margin=45,
+        )
         fig_bar.update_layout(
-            height=400,
             coloraxis_showscale=False,
-            margin=dict(l=10, r=45, t=45, b=10),
+            xaxis=dict(title="Puntos Totales", tickfont=dict(size=12), rangemode="tozero"),
+            yaxis=dict(title="", tickfont=dict(size=12)),
         )
         st.plotly_chart(fig_bar, width="stretch")
 
@@ -544,6 +587,8 @@ with tab_vis:
                 orientation="h",
                 text=range_df["Máxima"],
                 textposition="outside",
+                textfont=dict(size=12),
+                cliponaxis=False,
             )
         )
         fig_mm.add_trace(
@@ -554,45 +599,120 @@ with tab_vis:
                 orientation="h",
                 text=range_df["Mínima"],
                 textposition="outside",
+                textfont=dict(size=12),
+                cliponaxis=False,
             )
+        )
+        _apply_clean_layout(
+            fig_mm,
+            height=410,
+            title="Puntuación Máxima vs. Mínima por Mánager",
+            top_margin=70,
+            right_margin=45,
         )
         fig_mm.update_layout(
             barmode="group",
-            height=400,
-            title="Puntuación Máxima vs. Mínima por Mánager",
-            margin=dict(l=10, r=45, t=45, b=10),
+            legend=dict(
+                orientation="h",
+                yanchor="bottom",
+                y=1.02,
+                xanchor="left",
+                x=0,
+                font=dict(size=12),
+            ),
+            xaxis=dict(title="Puntos", tickfont=dict(size=12), rangemode="tozero"),
+            yaxis=dict(title="", tickfont=dict(size=12)),
         )
         st.plotly_chart(fig_mm, width="stretch")
 
-# 2. EVOLUCIÓN POR JORNADA
+# 2. EVOLUCIÓN POR JORNADA (SEGUIMIENTO)
 with tab_evo:
-    sub_pts = df_pts_j.loc[active_managers, active_rounds]
-    df_melt = sub_pts.reset_index().melt(
-        id_vars="Mánager",
-        var_name="Jornada",
-        value_name="Puntos",
-    )
+    st.subheader("Seguimiento por jornada")
+    st.caption("Comparativa alineada de puntuación y rendimiento jornada a jornada.")
 
-    fig_line = px.line(
-        df_melt,
-        x="Jornada",
-        y="Puntos",
-        color="Mánager",
-        markers=True,
-        title="Puntuación por Jornada",
-    )
-    fig_line.update_layout(height=420, hovermode="x unified")
-    st.plotly_chart(fig_line, width="stretch")
+    sub_pts = df_pts_j.loc[active_managers, active_rounds].copy()
+    sub_pts = sub_pts.dropna(how="all")
 
-    fig_heat = px.imshow(
-        sub_pts,
-        text_auto=True,
-        aspect="auto",
-        color_continuous_scale="Blues",
-        title="Mapa de Calor de Puntos por Jornada",
-    )
-    fig_heat.update_layout(height=380)
-    st.plotly_chart(fig_heat, width="stretch")
+    if sub_pts.empty:
+        st.info("No hay datos de seguimiento para los filtros seleccionados.")
+    else:
+        df_melt = (
+            sub_pts.reset_index()
+            .melt(id_vars="Mánager", var_name="Jornada", value_name="Puntos")
+            .dropna(subset=["Puntos"])
+        )
+        df_melt["Puntos"] = df_melt["Puntos"].round(0).astype(int)
+
+        fig_line = px.line(
+            df_melt,
+            x="Jornada",
+            y="Puntos",
+            color="Mánager",
+            category_orders={"Jornada": active_rounds},
+            markers=True,
+            title="Evolución de puntos por jornada",
+        )
+        fig_line.update_traces(
+            marker=dict(size=7, line=dict(width=1, color="#111827")),
+            line=dict(width=2.2),
+        )
+        _apply_clean_layout(
+            fig_line,
+            height=430,
+            title="Evolución de puntos por jornada",
+            top_margin=70,
+            right_margin=25,
+        )
+        fig_line.update_layout(
+            hovermode="x unified",
+            legend=dict(
+                orientation="h",
+                yanchor="bottom",
+                y=1.02,
+                xanchor="left",
+                x=0,
+                font=dict(size=12),
+            ),
+            xaxis=dict(title="Jornada", tickfont=dict(size=12)),
+            yaxis=dict(title="Puntos", tickfont=dict(size=12), rangemode="tozero"),
+        )
+        st.plotly_chart(fig_line, width="stretch")
+
+        pts_min = int(sub_pts.min().min()) if not sub_pts.isna().all().all() else 0
+        pts_max = int(sub_pts.max().max()) if not sub_pts.isna().all().all() else 100
+
+        fig_heat = px.imshow(
+            sub_pts,
+            text_auto=".0f",
+            aspect="auto",
+            color_continuous_scale="Tealgrn",
+            zmin=pts_min,
+            zmax=pts_max,
+            title="Matriz de puntos por jornada",
+        )
+        fig_heat.update_traces(textfont=dict(size=12))
+        _apply_clean_layout(
+            fig_heat,
+            height=380,
+            title="Matriz de puntos por jornada",
+            top_margin=55,
+            right_margin=25,
+        )
+        fig_heat.update_layout(
+            coloraxis_colorbar=dict(title="Pts", thickness=14, len=0.85),
+            xaxis=dict(title="Jornada", tickfont=dict(size=12)),
+            yaxis=dict(title="", tickfont=dict(size=12)),
+        )
+        st.plotly_chart(fig_heat, width="stretch")
+
+        with st.expander("Ver tabla numérica de seguimiento"):
+            num_cols = {col: st.column_config.NumberColumn(col, format="%d") for col in active_rounds}
+            st.dataframe(
+                sub_pts.reset_index(),
+                width="stretch",
+                hide_index=True,
+                column_config=num_cols,
+            )
 
 # 3. REGULARIDAD Y CAPITÁN
 with tab_reg:
@@ -628,8 +748,22 @@ with tab_reg:
             title="Regularidad (CV) vs. Media por Jornada",
             labels={"CV": "Coeficiente de Variación (menor = más regular)"},
         )
-        fig_scatter.update_traces(textposition="top center")
-        fig_scatter.update_layout(height=400, showlegend=False, margin=dict(l=10, r=20, t=45, b=10))
+        fig_scatter.update_traces(
+            textposition="top center",
+            textfont=dict(size=11),
+        )
+        _apply_clean_layout(
+            fig_scatter,
+            height=410,
+            title="Regularidad (CV) vs. Media por Jornada",
+            top_margin=55,
+            right_margin=25,
+        )
+        fig_scatter.update_layout(
+            showlegend=False,
+            xaxis=dict(title="Media / J", tickfont=dict(size=12)),
+            yaxis=dict(title="CV (menor = más regular)", tickfont=dict(size=12), rangemode="tozero"),
+        )
         st.plotly_chart(fig_scatter, width="stretch")
 
     with r_right:
@@ -642,8 +776,22 @@ with tab_reg:
             text="Bonus Cap.",
             title="Bonus Neto de Capitán por Mánager",
         )
-        fig_cap.update_traces(textposition="outside", cliponaxis=False)
-        fig_cap.update_layout(height=400, margin=dict(l=10, r=45, t=45, b=10))
+        fig_cap.update_traces(
+            textposition="outside",
+            textfont=dict(size=12),
+            cliponaxis=False,
+        )
+        _apply_clean_layout(
+            fig_cap,
+            height=410,
+            title="Bonus Neto de Capitán por Mánager",
+            top_margin=55,
+            right_margin=45,
+        )
+        fig_cap.update_layout(
+            xaxis=dict(title="Bonus Cap.", tickfont=dict(size=12)),
+            yaxis=dict(title="", tickfont=dict(size=12)),
+        )
         st.plotly_chart(fig_cap, width="stretch")
 
 # 4. PROYECCIÓN J17
@@ -664,10 +812,33 @@ with tab_proj:
         y="Puntos",
         color="Escenario",
         barmode="group",
-        text_auto=True,
+        text_auto=".0f",
         title="Puntos Actuales vs. Proyección a J17 (Media vs. Últimas 3 Jornadas)",
     )
-    fig_proj.update_layout(height=450, xaxis_tickangle=-25)
+    fig_proj.update_traces(
+        textposition="outside",
+        textfont=dict(size=11),
+        cliponaxis=False,
+    )
+    _apply_clean_layout(
+        fig_proj,
+        height=450,
+        title="Puntos Actuales vs. Proyección a J17 (Media vs. Últimas 3 Jornadas)",
+        top_margin=70,
+        right_margin=25,
+    )
+    fig_proj.update_layout(
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.02,
+            xanchor="left",
+            x=0,
+            font=dict(size=12),
+        ),
+        xaxis=dict(title="", tickfont=dict(size=12), tickangle=-20),
+        yaxis=dict(title="Puntos", tickfont=dict(size=12), rangemode="tozero"),
+    )
     st.plotly_chart(fig_proj, width="stretch")
 
     st.dataframe(
@@ -682,27 +853,33 @@ with tab_proj:
 with tab_mgr:
     chosen = st.selectbox("Elige un mánager", options=all_managers)
     row = df_cls[df_cls["Mánager"] == chosen].iloc[0]
-    chosen_norm = _strip_accents(chosen).strip().casefold()
+    chosen_norm = _norm_key(chosen)
 
     ordered_summary_rounds = sorted(
         [
             rk
             for rk, m_map in summaries_by_round.items()
-            if any(_strip_accents(k).strip().casefold() == chosen_norm and v.strip() for k, v in m_map.items())
+            if any(_norm_key(k) == chosen_norm and v.strip() for k, v in m_map.items())
         ],
         key=lambda x: int(_round_num_str(x)) if _round_num_str(x).isdigit() else 0,
     )
 
     if ordered_summary_rounds:
         last_rk = ordered_summary_rounds[-1]
-        last_map = {_strip_accents(k).strip().casefold(): v for k, v in summaries_by_round[last_rk].items()}
+        last_map = {_norm_key(k): v for k, v in summaries_by_round[last_rk].items()}
+        clean_last = _clean_lead_name(chosen, last_map[chosen_norm])
+        main_last, fact_last = _split_summary_and_fact(clean_last)
+
         st.markdown(f"### 🗞️ Resumen — {chosen} (JORNADA {_round_num_str(last_rk)})")
-        st.info(last_map[chosen_norm])
+        with st.container(border=True):
+            st.markdown(main_last)
+            if fact_last:
+                st.caption(f"💡 *Dato curioso:* {fact_last}")
 
         if len(ordered_summary_rounds) > 1:
             with st.expander(f"Evolución en la hoja 'Mánagers' para {chosen} ({len(ordered_summary_rounds)} jornadas)"):
                 for rk in reversed(ordered_summary_rounds):
-                    rk_map = {_strip_accents(k).strip().casefold(): v for k, v in summaries_by_round[rk].items()}
+                    rk_map = {_norm_key(k): v for k, v in summaries_by_round[rk].items()}
                     st.markdown(f"**JORNADA {_round_num_str(rk)}:** {rk_map[chosen_norm]}")
     else:
         st.caption(f"No hay resumen en la hoja 'Mánagers' del Excel para **{chosen}**.")
@@ -718,8 +895,14 @@ with tab_mgr:
     r_cols = st.columns(3)
     with r_cols[0]:
         s_pts = df_pts_j.loc[chosen, active_rounds].rename("Puntos")
-        fig_m = px.bar(s_pts, x=s_pts.index, y="Puntos", text_auto=True, title=f"Puntos por jornada — {chosen}")
-        fig_m.update_layout(height=300, showlegend=False)
+        fig_m = px.bar(s_pts, x=s_pts.index, y="Puntos", text_auto=".0f", title=f"Puntos por jornada — {chosen}")
+        fig_m.update_traces(textposition="outside", textfont=dict(size=11), cliponaxis=False)
+        _apply_clean_layout(fig_m, height=320, title=f"Puntos por jornada — {chosen}", top_margin=55)
+        fig_m.update_layout(
+            showlegend=False,
+            xaxis=dict(title="Jornada", tickfont=dict(size=11)),
+            yaxis=dict(title="Puntos", tickfont=dict(size=11), rangemode="tozero"),
+        )
         st.plotly_chart(fig_m, width="stretch")
 
     with r_cols[1]:
@@ -728,11 +911,17 @@ with tab_mgr:
             s_cap,
             x=s_cap.index,
             y="Capitán",
-            text_auto=True,
+            text_auto=".0f",
             title=f"Puntos capitán — {chosen}",
             color_discrete_sequence=["#0F766E"],
         )
-        fig_c.update_layout(height=300, showlegend=False)
+        fig_c.update_traces(textposition="outside", textfont=dict(size=11), cliponaxis=False)
+        _apply_clean_layout(fig_c, height=320, title=f"Puntos capitán — {chosen}", top_margin=55)
+        fig_c.update_layout(
+            showlegend=False,
+            xaxis=dict(title="Jornada", tickfont=dict(size=11)),
+            yaxis=dict(title="Capitán", tickfont=dict(size=11), rangemode="tozero"),
+        )
         st.plotly_chart(fig_c, width="stretch")
 
     with r_cols[2]:
@@ -742,8 +931,28 @@ with tab_mgr:
                 "PaC": df_pac_j.loc[chosen, active_rounds],
             }
         )
-        fig_o = px.bar(df_of, x=df_of.index, y=["G+A", "PaC"], barmode="group", title=f"Ofensiva (G+A) y PaC — {chosen}")
-        fig_o.update_layout(height=300)
+        fig_o = px.bar(
+            df_of,
+            x=df_of.index,
+            y=["G+A", "PaC"],
+            barmode="group",
+            text_auto=".0f",
+            title=f"Ofensiva (G+A) y PaC — {chosen}",
+        )
+        fig_o.update_traces(textposition="outside", textfont=dict(size=11), cliponaxis=False)
+        _apply_clean_layout(fig_o, height=320, title=f"Ofensiva (G+A) y PaC — {chosen}", top_margin=65)
+        fig_o.update_layout(
+            legend=dict(
+                orientation="h",
+                yanchor="bottom",
+                y=1.02,
+                xanchor="left",
+                x=0,
+                font=dict(size=11),
+            ),
+            xaxis=dict(title="Jornada", tickfont=dict(size=11)),
+            yaxis=dict(title="Total", tickfont=dict(size=11), rangemode="tozero"),
+        )
         st.plotly_chart(fig_o, width="stretch")
 
 # 6. RESÚMENES POR JORNADA
@@ -778,13 +987,13 @@ with tab_res:
             show_facts = st.toggle("Mostrar dato curioso", value=True)
 
         mgr_map = summaries_by_round.get(selected_sum_round, {})
-        mgr_map_norm = {_strip_accents(k).strip().casefold(): v for k, v in mgr_map.items()}
+        mgr_map_norm = {_norm_key(k): v for k, v in mgr_map.items()}
 
         items_to_show: list[tuple[str, str]] = []
         for m_name in all_managers:
             if m_name not in active_managers:
                 continue
-            raw_txt = mgr_map.get(m_name) or mgr_map_norm.get(_strip_accents(m_name).strip().casefold())
+            raw_txt = mgr_map.get(m_name) or mgr_map_norm.get(_norm_key(m_name))
             if not raw_txt:
                 continue
             clean_txt = _clean_lead_name(m_name, raw_txt)
