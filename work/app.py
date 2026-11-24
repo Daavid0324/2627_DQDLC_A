@@ -1,4 +1,6 @@
+from datetime import datetime
 from io import BytesIO
+import json
 from pathlib import Path
 import numpy as np
 import pandas as pd
@@ -27,14 +29,16 @@ ROW_MULT_START = 69
 COL_ROUNDS_START = 8
 COL_ROUNDS_END = 25  # slice [8:25] -> 17 jornadas
 
+APP_DIR = Path(__file__).resolve().parent
+HISTORY_FILE = APP_DIR / "donqui_resumenes_jornadas.json"
+
 
 def find_excel_file(filename: str) -> Path | None:
     """Busca el archivo Excel priorizando el nombre exacto o archivos de la liga."""
-    app_dir = Path(__file__).resolve().parent
     search_dirs = [
-        app_dir,
-        app_dir.parent,
-        app_dir.parent.parent,
+        APP_DIR,
+        APP_DIR.parent,
+        APP_DIR.parent.parent,
         Path.cwd(),
     ]
 
@@ -74,9 +78,83 @@ def _is_valid_number(val) -> bool:
     return s != "" and s.lower() != "nan"
 
 
+def _normalize_round_key(label: str, fallback_round: int) -> str:
+    """Normaliza etiquetas como 'JORNADA 13', 'Jornada 13' o 'J13' a 'J13'."""
+    s = str(label).strip().upper()
+    digits = "".join(ch for ch in s if ch.isdigit())
+    if digits:
+        return f"J{int(digits)}"
+    return f"J{max(1, fallback_round)}"
+
+
+def load_history_store() -> dict:
+    """Carga el historial persistido de resúmenes por jornada."""
+    default_store = {
+        "managers": {},   # { "J13": { "Donqui": "...", ... } }
+        "general": {},    # { "J13": "Resumen general de jornada..." }
+        "updated_at": None,
+    }
+    if not HISTORY_FILE.exists():
+        return default_store
+    try:
+        data = json.loads(HISTORY_FILE.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            data.setdefault("managers", {})
+            data.setdefault("general", {})
+            data.setdefault("updated_at", None)
+            return data
+    except Exception:
+        pass
+    return default_store
+
+
+def save_history_store(store: dict) -> None:
+    """Guarda el historial de resúmenes en disco."""
+    store["updated_at"] = datetime.now().isoformat(timespec="seconds")
+    HISTORY_FILE.write_text(
+        json.dumps(store, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
+def sync_excel_summaries_to_history(excel_round_key: str, excel_mgr_summaries: dict[str, str]) -> dict:
+    """Sincroniza los resúmenes presentes en la hoja 'Mánagers' del Excel con el historial."""
+    store = load_history_store()
+    round_bucket = store["managers"].setdefault(excel_round_key, {})
+    for mgr_name, text in excel_mgr_summaries.items():
+        if text and text.strip():
+            # Si no existía o el Excel trae una versión no vacía, lo registramos en esa jornada
+            if mgr_name not in round_bucket or round_bucket[mgr_name] != text.strip():
+                round_bucket[mgr_name] = text.strip()
+    save_history_store(store)
+    return store
+
+
 @st.cache_data(show_spinner="Cargando datos de Donqui League...")
 def load_league_data(source_key: str, file_bytes: bytes):
-    df_orig = pd.read_excel(BytesIO(file_bytes), sheet_name="Datos Originales", header=None)
+    bio = BytesIO(file_bytes)
+    xls = pd.ExcelFile(bio)
+    sheet_names = xls.sheet_names
+
+    df_orig = pd.read_excel(bio, sheet_name="Datos Originales", header=None)
+
+    # Lectura opcional de hoja 'Capitanes'
+    cap_extra: dict[str, dict] = {}
+    if "Capitanes" in sheet_names:
+        bio.seek(0)
+        df_cap_sheet = pd.read_excel(bio, sheet_name="Capitanes", header=None)
+        for r_i in range(16, min(len(df_cap_sheet), 30)):
+            m_raw = df_cap_sheet.iloc[r_i, 0]
+            if pd.notna(m_raw) and str(m_raw).strip():
+                m_key = str(m_raw).strip()
+                cap_extra[m_key] = {
+                    "Veces x3": int(round(float(df_cap_sheet.iloc[r_i, 2]))) if _is_valid_number(df_cap_sheet.iloc[r_i, 2]) else 0,
+                    "Veces x2": int(round(float(df_cap_sheet.iloc[r_i, 3]))) if _is_valid_number(df_cap_sheet.iloc[r_i, 3]) else 0,
+                    "Veces x1,5": int(round(float(df_cap_sheet.iloc[r_i, 4]))) if _is_valid_number(df_cap_sheet.iloc[r_i, 4]) else 0,
+                    "Mult. Promedio": round(float(df_cap_sheet.iloc[r_i, 5]), 2) if _is_valid_number(df_cap_sheet.iloc[r_i, 5]) else 0.0,
+                    "Cap. Top (≥5)": int(round(float(df_cap_sheet.iloc[r_i, 7]))) if _is_valid_number(df_cap_sheet.iloc[r_i, 7]) else 0,
+                    "% Aporte Cap.": round(float(df_cap_sheet.iloc[r_i, 8]) * 100, 1) if _is_valid_number(df_cap_sheet.iloc[r_i, 8]) else 0.0,
+                }
 
     managers = []
     pts_matrix = {}
@@ -165,6 +243,18 @@ def load_league_data(source_key: str, file_bytes: bytes):
                 ranks.append(int(s_ranks.iloc[match_idx]))
 
         ga_tot = int(round(sum(goals) + sum(assists)))
+        extra = cap_extra.get(
+            name,
+            {
+                "Veces x3": 0,
+                "Veces x2": 0,
+                "Veces x1,5": 0,
+                "Mult. Promedio": 0.0,
+                "Cap. Top (≥5)": 0,
+                "% Aporte Cap.": round((cap_pts / tot * 100), 1) if tot else 0.0,
+            },
+        )
+
         managers.append(
             {
                 "Mánager": name,
@@ -190,6 +280,7 @@ def load_league_data(source_key: str, file_bytes: bytes):
                 "Proy. Forma J17": int(round(tot + last3 * rem_j)),
                 "Mínima": int(round(min(played_pts))) if played_pts else 0,
                 "Máxima": int(round(max(played_pts))) if played_pts else 0,
+                **extra,
             }
         )
 
@@ -215,7 +306,37 @@ def load_league_data(source_key: str, file_bytes: bytes):
     df_ga_j = pd.DataFrame.from_dict(ga_matrix, orient="index").reindex(index=df_cls["Mánager"], columns=present_cols)
     df_pac_j = pd.DataFrame.from_dict(pac_matrix, orient="index").reindex(index=df_cls["Mánager"], columns=present_cols)
 
-    return df_cls, df_pts_j, df_cap_j, df_ga_j, df_pac_j
+    # Lectura de hoja 'Mánagers' (resumen por jornada)
+    max_j_played = int(df_cls["Jornadas"].max()) if not df_cls.empty else 1
+    excel_round_label = f"JORNADA {max_j_played}"
+    excel_round_key = f"J{max_j_played}"
+    excel_mgr_summaries: dict[str, str] = {}
+
+    if "Mánagers" in sheet_names:
+        bio.seek(0)
+        df_mgr_sheet = pd.read_excel(bio, sheet_name="Mánagers", header=None)
+        if not df_mgr_sheet.empty and pd.notna(df_mgr_sheet.iloc[0, 0]):
+            header_val = str(df_mgr_sheet.iloc[0, 0]).strip()
+            if header_val:
+                excel_round_label = header_val
+                excel_round_key = _normalize_round_key(header_val, max_j_played)
+
+        for r_i in range(1, len(df_mgr_sheet)):
+            m_val = df_mgr_sheet.iloc[r_i, 0]
+            txt_val = df_mgr_sheet.iloc[r_i, 1] if df_mgr_sheet.shape[1] > 1 else None
+            if pd.notna(m_val) and str(m_val).strip() and pd.notna(txt_val) and str(txt_val).strip():
+                excel_mgr_summaries[str(m_val).strip()] = str(txt_val).strip()
+
+    return (
+        df_cls,
+        df_pts_j,
+        df_cap_j,
+        df_ga_j,
+        df_pac_j,
+        excel_round_key,
+        excel_round_label,
+        excel_mgr_summaries,
+    )
 
 
 st.title("⚽ Donqui League — Centro Analítico")
@@ -244,21 +365,31 @@ else:
     file_bytes = uploaded_file.getvalue()
     source_key = f"upload::{uploaded_file.name}::{len(file_bytes)}"
 
-df_cls, df_pts_j, df_cap_j, df_ga_j, df_pac_j = load_league_data(source_key, file_bytes)
+(
+    df_cls,
+    df_pts_j,
+    df_cap_j,
+    df_ga_j,
+    df_pac_j,
+    excel_round_key,
+    excel_round_label,
+    excel_mgr_summaries,
+) = load_league_data(source_key, file_bytes)
 
 if df_cls.empty or df_pts_j.empty:
     st.info("El archivo se cargó, pero no hay datos de jornadas registrados todavía.")
     st.stop()
+
+history_store = sync_excel_summaries_to_history(excel_round_key, excel_mgr_summaries)
 
 current_round = int(df_cls["Jornadas"].max())
 rem_rounds = max(0, TOTAL_ROUNDS - current_round)
 all_managers = df_cls["Mánager"].tolist()
 all_rounds = df_pts_j.columns.tolist()
 
-# --- FILTROS MEJORADOS EN SIDEBAR ---
+# --- FILTROS EN SIDEBAR ---
 st.sidebar.header("🎛️ Filtros de análisis")
 
-# 1. Filtro de mánagers con botones rápidos
 if "mgr_filter" not in st.session_state or set(st.session_state["mgr_filter"]) - set(all_managers):
     st.session_state["mgr_filter"] = all_managers.copy()
 
@@ -281,7 +412,6 @@ else:
 
 st.sidebar.divider()
 
-# 2. Filtro de jornadas con presets + rango + detalle
 preset = st.sidebar.radio(
     "Tramo rápido de jornadas",
     options=["Todas", "Últimas 3J", "Últimas 5J", "Rango / Manual"],
@@ -332,17 +462,18 @@ k4.metric("Más regular (CV)", most_consistent["Mánager"], f"CV {most_consisten
 k5.metric("Top G+A", top_ga["Mánager"], f"{top_ga['G+A']} contribuciones")
 
 # --- PESTAÑAS ---
-tab_vis, tab_evo, tab_reg, tab_proj, tab_mgr = st.tabs(
+tab_vis, tab_evo, tab_reg, tab_proj, tab_mgr, tab_res = st.tabs(
     [
         "🏆 Visión General",
         "📈 Evolución por Jornada",
         "📊 Regularidad y Capitán",
         "🎯 Proyección J17",
         "🕵️ Ficha por Mánager",
+        "📝 Resúmenes por Jornada",
     ]
 )
 
-# 1. VISIÓN GENERAL (Limpia y visual: solo métricas solicitadas)
+# 1. VISIÓN GENERAL (Limpia y visual con las métricas solicitadas)
 with tab_vis:
     overview_cols = [
         "Pos",
@@ -456,7 +587,7 @@ with tab_evo:
     fig_heat.update_layout(height=380)
     st.plotly_chart(fig_heat, width="stretch")
 
-# 3. REGULARIDAD Y CAPITÁN (Métricas avanzadas)
+# 3. REGULARIDAD Y CAPITÁN
 with tab_reg:
     deep_cols = [
         "Pos",
@@ -468,6 +599,9 @@ with tab_reg:
         "Últ. 3J",
         "Bonus Cap.",
         "Sin Cap.",
+        "Mult. Promedio",
+        "Veces x3",
+        "Cap. Top (≥5)",
         "Pts / (G+A)",
         "Victorias J",
         "Top 3 J",
@@ -537,10 +671,34 @@ with tab_proj:
         hide_index=True,
     )
 
-# 5. FICHA POR MÁNAGER
+# 5. FICHA POR MÁNAGER (Integra resumen actual + evolución histórica de resúmenes)
 with tab_mgr:
     chosen = st.selectbox("Elige un mánager", options=all_managers)
     row = df_cls[df_cls["Mánager"] == chosen].iloc[0]
+
+    # Resumen del mánager en la jornada activa del Excel o historial
+    mgr_hist_rounds = sorted(
+        [rk for rk, m_map in history_store.get("managers", {}).items() if chosen in m_map and m_map[chosen].strip()],
+        key=lambda x: int("".join(ch for ch in x if ch.isdigit()) or 0),
+    )
+
+    latest_summary = excel_mgr_summaries.get(chosen)
+    latest_label = excel_round_label
+    if not latest_summary and mgr_hist_rounds:
+        last_rk = mgr_hist_rounds[-1]
+        latest_summary = history_store["managers"][last_rk][chosen]
+        latest_label = f"JORNADA {last_rk[1:]}"
+
+    if latest_summary:
+        st.markdown(f"### 🗞️ Resumen — {chosen} ({latest_label})")
+        st.info(latest_summary)
+    else:
+        st.caption(f"No hay resumen registrado todavía para **{chosen}**.")
+
+    if len(mgr_hist_rounds) > 1:
+        with st.expander(f"Ver evolución histórica de resúmenes de {chosen} ({len(mgr_hist_rounds)} jornadas)"):
+            for rk in reversed(mgr_hist_rounds):
+                st.markdown(f"**Jornada {rk[1:]}:** {history_store['managers'][rk][chosen]}")
 
     m1, m2, m3, m4, m5, m6 = st.columns(6)
     m1.metric("Puesto", f"#{int(row['Pos'])}")
@@ -580,3 +738,23 @@ with tab_mgr:
         fig_o = px.bar(df_of, x=df_of.index, y=["G+A", "PaC"], barmode="group", title=f"Ofensiva (G+A) y PaC — {chosen}")
         fig_o.update_layout(height=300)
         st.plotly_chart(fig_o, width="stretch")
+
+# 6. RESÚMENES POR JORNADA (Desde J13 en adelante + evolución acumulable)
+with tab_res:
+    st.subheader("Evolución y registro de resúmenes por jornada")
+    st.caption(
+        "Los resúmenes de la hoja 'Mánagers' del Excel se sincronizan automáticamente por jornada "
+        "(desde J13 en adelante). Aquí puedes consultar el histórico completo o añadir/editar resúmenes."
+    )
+
+    available_hist_rounds = sorted(
+        set(list(history_store.get("managers", {}).keys()) + list(history_store.get("general", {}).keys())),
+        key=lambda x: int("".join(ch for ch in x if ch.isdigit()) or 0),
+    )
+
+    default_r_idx = 0
+    if excel_round_key in available_hist_rounds:
+        default_r_idx = available_hist_rounds.index(excel_round_key)
+
+    st.markdown("#### 1. Consultar evolución por jornada")
+    if
