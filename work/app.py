@@ -141,9 +141,8 @@ def _extract_managers_summaries(
 ) -> dict[str, dict[str, str]]:
     """
     Lee resúmenes por jornada y mánager desde la hoja 'Mánagers' del Excel,
-    soportando tanto:
-    - Columna A con encabezado ('JORNADA 13') y celdas 'Mánager: texto...'
-    - Como Columna A = Mánager y Columna B = texto.
+    soportando tanto una celda en columna A ('Nombre: texto...') como
+    nombre en columna A y texto en columna B+.
     """
     summaries_by_round: dict[str, dict[str, str]] = {}
     current_rk = f"J{max(1, fallback_round)}"
@@ -165,7 +164,6 @@ def _extract_managers_summaries(
             summaries_by_round.setdefault(current_rk, {})
             continue
 
-        # Caso 1: Nombre en columna A y texto en columna B+
         if len(row_vals) >= 2:
             mgr_name = row_vals[0]
             summary_text = " ".join(row_vals[1:]).strip()
@@ -174,18 +172,15 @@ def _extract_managers_summaries(
                 summaries_by_round.setdefault(current_rk, {})[canon] = summary_text
             continue
 
-        # Caso 2: Todo en una sola celda en columna A ("Nombre: ...")
         m_colon = re.match(r"^([^:]+):\s*(.+)$", first_cell, flags=re.DOTALL)
         if m_colon:
             cand_raw = m_colon.group(1).strip()
-            cand_key = _norm_key(cand_raw)
-            canon = known_map.get(cand_key, cand_raw)
+            canon = known_map.get(_norm_key(cand_raw), cand_raw)
             body = m_colon.group(2).strip()
             if canon and body:
                 summaries_by_round.setdefault(current_rk, {})[canon] = body
                 continue
 
-        # Caso 3: Celda en columna A que empieza por el nombre del mánager
         for k_norm, canon in known_map.items():
             if _norm_key(first_cell).startswith(k_norm + " "):
                 summaries_by_round.setdefault(current_rk, {})[canon] = first_cell
@@ -241,16 +236,6 @@ def load_league_data(source_key: str, file_bytes: bytes):
 
     orig_sheet = _find_sheet_name(sheet_names, "Datos Originales") or "Datos Originales"
     df_orig = pd.read_excel(bio, sheet_name=orig_sheet, header=None)
-
-    mgr_sheet_name = _find_sheet_name(sheet_names, "Mánagers")
-    if mgr_sheet_name:
-        bio.seek(0)
-        df_mgr_sheet = pd.read_excel(bio, sheet_name=mgr_sheet_name, header=None)
-        summaries_by_round = _extract_managers_summaries(
-            df_mgr_sheet,
-            max_j_played,
-            known_managers=managers,
-        )
 
     cap_extra: dict[str, dict] = {}
     cap_sheet_name = _find_sheet_name(sheet_names, "Capitanes")
@@ -418,7 +403,11 @@ def load_league_data(source_key: str, file_bytes: bytes):
     if mgr_sheet_name:
         bio.seek(0)
         df_mgr_sheet = pd.read_excel(bio, sheet_name=mgr_sheet_name, header=None)
-        summaries_by_round = _extract_managers_summaries(df_mgr_sheet, max_j_played)
+        summaries_by_round = _extract_managers_summaries(
+            df_mgr_sheet,
+            max_j_played,
+            known_managers=managers,
+        )
 
     return df_cls, df_pts_j, df_cap_j, df_ga_j, df_pac_j, summaries_by_round
 
