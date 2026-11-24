@@ -75,7 +75,26 @@ def _is_valid_number(val) -> bool:
     if pd.isna(val):
         return False
     s = str(val).strip()
-    return s != "" and s.lower() != "nan"
+    return s != "" and s.lower() not in {"nan", "none", "null", "n/a", "-", "—"}
+
+
+def _safe_float(val, default: float = 0.0) -> float:
+    if not _is_valid_number(val):
+        return default
+    if isinstance(val, (int, float, np.number)):
+        f = float(val)
+        return default if (np.isnan(f) or np.isinf(f)) else f
+    try:
+        cleaned = str(val).strip().replace(",", ".")
+        f = float(cleaned)
+        return default if (np.isnan(f) or np.isinf(f)) else f
+    except (ValueError, TypeError):
+        return default
+
+
+def _safe_int(val, default: int = 0) -> int:
+    f = _safe_float(val, default=float(default))
+    return int(round(f))
 
 
 def _normalize_round_key(label: str, fallback_round: int) -> str:
@@ -139,21 +158,22 @@ def load_league_data(source_key: str, file_bytes: bytes):
     df_orig = pd.read_excel(bio, sheet_name="Datos Originales", header=None)
 
     # Lectura opcional de hoja 'Capitanes'
-    cap_extra: dict[str, dict] = {}
+cap_extra: dict[str, dict] = {}
     if "Capitanes" in sheet_names:
         bio.seek(0)
         df_cap_sheet = pd.read_excel(bio, sheet_name="Capitanes", header=None)
-        for r_i in range(16, min(len(df_cap_sheet), 30)):
+        for r_i in range(16, min(len(df_cap_sheet), 35)):
             m_raw = df_cap_sheet.iloc[r_i, 0]
             if pd.notna(m_raw) and str(m_raw).strip():
                 m_key = str(m_raw).strip()
+                n_cols = df_cap_sheet.shape[1]
                 cap_extra[m_key] = {
-                    "Veces x3": int(round(float(df_cap_sheet.iloc[r_i, 2]))) if _is_valid_number(df_cap_sheet.iloc[r_i, 2]) else 0,
-                    "Veces x2": int(round(float(df_cap_sheet.iloc[r_i, 3]))) if _is_valid_number(df_cap_sheet.iloc[r_i, 3]) else 0,
-                    "Veces x1,5": int(round(float(df_cap_sheet.iloc[r_i, 4]))) if _is_valid_number(df_cap_sheet.iloc[r_i, 4]) else 0,
-                    "Mult. Promedio": round(float(df_cap_sheet.iloc[r_i, 5]), 2) if _is_valid_number(df_cap_sheet.iloc[r_i, 5]) else 0.0,
-                    "Cap. Top (≥5)": int(round(float(df_cap_sheet.iloc[r_i, 7]))) if _is_valid_number(df_cap_sheet.iloc[r_i, 7]) else 0,
-                    "% Aporte Cap.": round(float(df_cap_sheet.iloc[r_i, 8]) * 100, 1) if _is_valid_number(df_cap_sheet.iloc[r_i, 8]) else 0.0,
+                    "Veces x3": _safe_int(df_cap_sheet.iloc[r_i, 2]) if n_cols > 2 else 0,
+                    "Veces x2": _safe_int(df_cap_sheet.iloc[r_i, 3]) if n_cols > 3 else 0,
+                    "Veces x1,5": _safe_int(df_cap_sheet.iloc[r_i, 4]) if n_cols > 4 else 0,
+                    "Mult. Promedio": round(_safe_float(df_cap_sheet.iloc[r_i, 5]), 2) if n_cols > 5 else 0.0,
+                    "Cap. Top (≥5)": _safe_int(df_cap_sheet.iloc[r_i, 7]) if n_cols > 7 else 0,
+                    "% Aporte Cap.": round(_safe_float(df_cap_sheet.iloc[r_i, 8]) * 100, 1) if n_cols > 8 else 0.0,
                 }
 
     managers = []
