@@ -757,4 +757,68 @@ with tab_res:
         default_r_idx = available_hist_rounds.index(excel_round_key)
 
     st.markdown("#### 1. Consultar evolución por jornada")
-    if
+    if available_hist_rounds:
+        selected_hist_round = st.selectbox(
+            "Selecciona una jornada guardada",
+            options=available_hist_rounds,
+            index=default_r_idx,
+            format_func=lambda k: f"Jornada {k[1:]}",
+        )
+
+        gen_txt = history_store.get("general", {}).get(selected_hist_round, "")
+        if gen_txt:
+            st.markdown(f"**Resumen general — Jornada {selected_hist_round[1:]}**")
+            st.success(gen_txt)
+
+        mgr_map = history_store.get("managers", {}).get(selected_hist_round, {})
+        st.markdown(f"**Resúmenes individuales — Jornada {selected_hist_round[1:]}**")
+        for m_name in all_managers:
+            if m_name in active_managers and m_name in mgr_map:
+                st.markdown(f"- **{m_name}:** {mgr_map[m_name]}")
+    else:
+        st.info("Todavía no hay resúmenes guardados en el historial.")
+
+    st.divider()
+    st.markdown("#### 2. Añadir o actualizar resumen de una jornada")
+    edit_round_num = st.number_input(
+        "Número de jornada",
+        min_value=1,
+        max_value=TOTAL_ROUNDS,
+        value=max(13, current_round),
+        step=1,
+    )
+    edit_rk = f"J{int(edit_round_num)}"
+
+    existing_gen = history_store.get("general", {}).get(edit_rk, "")
+    new_gen = st.text_area(
+        f"Resumen general de {edit_rk} (opcional)",
+        value=existing_gen,
+        height=90,
+        placeholder=f"Escribe aquí un resumen global de lo ocurrido en {edit_rk}...",
+    )
+
+    edit_mgr = st.selectbox("Mánager para editar/añadir resumen", options=all_managers, key="edit_mgr_sel")
+    existing_mgr_txt = history_store.get("managers", {}).get(edit_rk, {}).get(edit_mgr, "")
+    new_mgr_txt = st.text_area(
+        f"Resumen de {edit_mgr} en {edit_rk}",
+        value=existing_mgr_txt,
+        height=110,
+        placeholder=f"Escribe o pega el resumen de {edit_mgr} para {edit_rk}...",
+    )
+
+    if st.button("💾 Guardar resumen en historial", width="stretch"):
+        updated = load_history_store()
+        if new_gen.strip():
+            updated["general"][edit_rk] = new_gen.strip()
+        elif edit_rk in updated["general"]:
+            del updated["general"][edit_rk]
+
+        updated["managers"].setdefault(edit_rk, {})
+        if new_mgr_txt.strip():
+            updated["managers"][edit_rk][edit_mgr] = new_mgr_txt.strip()
+        elif edit_mgr in updated["managers"][edit_rk]:
+            del updated["managers"][edit_rk][edit_mgr]
+
+        save_history_store(updated)
+        st.success(f"Resumen de {edit_rk} guardado correctamente.")
+        st.rerun()
