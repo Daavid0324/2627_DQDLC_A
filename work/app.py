@@ -109,8 +109,8 @@ def _normalize_round_key(label: str, fallback_round: int) -> str:
 def load_history_store() -> dict:
     """Carga el historial persistido de resúmenes por jornada."""
     default_store = {
-        "managers": {},   # { "J13": { "Donqui": "...", ... } }
-        "general": {},    # { "J13": "Resumen general de jornada..." }
+        "managers": {},
+        "general": {},
         "updated_at": None,
     }
     if not HISTORY_FILE.exists():
@@ -142,7 +142,6 @@ def sync_excel_summaries_to_history(excel_round_key: str, excel_mgr_summaries: d
     round_bucket = store["managers"].setdefault(excel_round_key, {})
     for mgr_name, text in excel_mgr_summaries.items():
         if text and text.strip():
-            # Si no existía o el Excel trae una versión no vacía, lo registramos en esa jornada
             if mgr_name not in round_bucket or round_bucket[mgr_name] != text.strip():
                 round_bucket[mgr_name] = text.strip()
     save_history_store(store)
@@ -157,8 +156,7 @@ def load_league_data(source_key: str, file_bytes: bytes):
 
     df_orig = pd.read_excel(bio, sheet_name="Datos Originales", header=None)
 
-    # Lectura opcional de hoja 'Capitanes'
-cap_extra: dict[str, dict] = {}
+    cap_extra: dict[str, dict] = {}
     if "Capitanes" in sheet_names:
         bio.seek(0)
         df_cap_sheet = pd.read_excel(bio, sheet_name="Capitanes", header=None)
@@ -195,40 +193,30 @@ cap_extra: dict[str, dict] = {}
         round_labels: list[str] = []
         for j_i, val in enumerate(raw_pts):
             if _is_valid_number(val):
-                played_pts.append(float(val))
+                played_pts.append(_safe_float(val))
                 round_labels.append(f"J{j_i + 1}")
 
         n_j = len(played_pts)
         rem_j = max(0, TOTAL_ROUNDS - n_j)
 
         cap_b = [
-            float(df_orig.iloc[ROW_CAP_BASE_START + idx, COL_ROUNDS_START + j])
-            if _is_valid_number(df_orig.iloc[ROW_CAP_BASE_START + idx, COL_ROUNDS_START + j])
-            else 0.0
+            _safe_float(df_orig.iloc[ROW_CAP_BASE_START + idx, COL_ROUNDS_START + j])
             for j in range(n_j)
         ]
         mult = [
-            float(df_orig.iloc[ROW_MULT_START + idx, COL_ROUNDS_START + j])
-            if _is_valid_number(df_orig.iloc[ROW_MULT_START + idx, COL_ROUNDS_START + j])
-            else 0.0
+            _safe_float(df_orig.iloc[ROW_MULT_START + idx, COL_ROUNDS_START + j])
             for j in range(n_j)
         ]
         goals = [
-            float(df_orig.iloc[ROW_GOALS_START + idx, COL_ROUNDS_START + j])
-            if _is_valid_number(df_orig.iloc[ROW_GOALS_START + idx, COL_ROUNDS_START + j])
-            else 0.0
+            _safe_float(df_orig.iloc[ROW_GOALS_START + idx, COL_ROUNDS_START + j])
             for j in range(n_j)
         ]
         assists = [
-            float(df_orig.iloc[ROW_ASSISTS_START + idx, COL_ROUNDS_START + j])
-            if _is_valid_number(df_orig.iloc[ROW_ASSISTS_START + idx, COL_ROUNDS_START + j])
-            else 0.0
+            _safe_float(df_orig.iloc[ROW_ASSISTS_START + idx, COL_ROUNDS_START + j])
             for j in range(n_j)
         ]
         pac = [
-            float(df_orig.iloc[ROW_PAC_START + idx, COL_ROUNDS_START + j])
-            if _is_valid_number(df_orig.iloc[ROW_PAC_START + idx, COL_ROUNDS_START + j])
-            else 0.0
+            _safe_float(df_orig.iloc[ROW_PAC_START + idx, COL_ROUNDS_START + j])
             for j in range(n_j)
         ]
 
@@ -248,7 +236,7 @@ cap_extra: dict[str, dict] = {}
         ranks: list[int] = []
         for j in range(n_j):
             col_vals = [
-                float(df_orig.iloc[ROW_PTS_START + k, COL_ROUNDS_START + j])
+                _safe_float(df_orig.iloc[ROW_PTS_START + k, COL_ROUNDS_START + j])
                 for k in range(NUM_MANAGERS)
                 if _is_valid_number(df_orig.iloc[ROW_PTS_START + k, COL_ROUNDS_START + j])
             ]
@@ -326,7 +314,6 @@ cap_extra: dict[str, dict] = {}
     df_ga_j = pd.DataFrame.from_dict(ga_matrix, orient="index").reindex(index=df_cls["Mánager"], columns=present_cols)
     df_pac_j = pd.DataFrame.from_dict(pac_matrix, orient="index").reindex(index=df_cls["Mánager"], columns=present_cols)
 
-    # Lectura de hoja 'Mánagers' (resumen por jornada)
     max_j_played = int(df_cls["Jornadas"].max()) if not df_cls.empty else 1
     excel_round_label = f"JORNADA {max_j_played}"
     excel_round_key = f"J{max_j_played}"
@@ -493,7 +480,7 @@ tab_vis, tab_evo, tab_reg, tab_proj, tab_mgr, tab_res = st.tabs(
     ]
 )
 
-# 1. VISIÓN GENERAL (Limpia y visual con las métricas solicitadas)
+# 1. VISIÓN GENERAL
 with tab_vis:
     overview_cols = [
         "Pos",
@@ -691,12 +678,11 @@ with tab_proj:
         hide_index=True,
     )
 
-# 5. FICHA POR MÁNAGER (Integra resumen actual + evolución histórica de resúmenes)
+# 5. FICHA POR MÁNAGER
 with tab_mgr:
     chosen = st.selectbox("Elige un mánager", options=all_managers)
     row = df_cls[df_cls["Mánager"] == chosen].iloc[0]
 
-    # Resumen del mánager en la jornada activa del Excel o historial
     mgr_hist_rounds = sorted(
         [rk for rk, m_map in history_store.get("managers", {}).items() if chosen in m_map and m_map[chosen].strip()],
         key=lambda x: int("".join(ch for ch in x if ch.isdigit()) or 0),
@@ -759,7 +745,7 @@ with tab_mgr:
         fig_o.update_layout(height=300)
         st.plotly_chart(fig_o, width="stretch")
 
-# 6. RESÚMENES POR JORNADA (Desde J13 en adelante + evolución acumulable)
+# 6. RESÚMENES POR JORNADA
 with tab_res:
     st.subheader("Evolución y registro de resúmenes por jornada")
     st.caption(
