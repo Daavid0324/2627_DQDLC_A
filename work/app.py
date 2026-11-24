@@ -1,7 +1,9 @@
+from io import BytesIO
 from pathlib import Path
 import numpy as np
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 import streamlit as st
 
 st.set_page_config(
@@ -38,13 +40,11 @@ def find_excel_file(filename: str) -> Path | None:
 
     valid_dirs = [d for d in search_dirs if d.exists() and d.is_dir()]
 
-    # 1. Coincidencia exacta
     for folder in valid_dirs:
         exact = folder / filename
         if exact.is_file():
             return exact
 
-    # 2. Archivos .xlsx que parezcan de la liga
     league_candidates: list[Path] = []
     other_candidates: list[Path] = []
 
@@ -76,8 +76,6 @@ def _is_valid_number(val) -> bool:
 
 @st.cache_data(show_spinner="Cargando datos de Donqui League...")
 def load_league_data(source_key: str, file_bytes: bytes):
-    from io import BytesIO
-
     df_orig = pd.read_excel(BytesIO(file_bytes), sheet_name="Datos Originales", header=None)
 
     managers = []
@@ -88,7 +86,11 @@ def load_league_data(source_key: str, file_bytes: bytes):
 
     for idx in range(NUM_MANAGERS):
         raw_name = df_orig.iloc[ROW_PTS_START + idx, 0]
-        name = str(raw_name).strip() if pd.notna(raw_name) and str(raw_name).strip() else f"Mánager {idx + 1}"
+        name = (
+            str(raw_name).strip()
+            if pd.notna(raw_name) and str(raw_name).strip()
+            else f"Mánager {idx + 1}"
+        )
         raw_pts = df_orig.iloc[ROW_PTS_START + idx, COL_ROUNDS_START:COL_ROUNDS_END].tolist()
 
         played_pts: list[float] = []
@@ -145,7 +147,6 @@ def load_league_data(source_key: str, file_bytes: bytes):
         last3 = float(np.mean(played_pts[-3:])) if n_j >= 3 else avg
         last_j = int(round(played_pts[-1])) if n_j else 0
 
-        # Cálculo robusto de posición en cada jornada (maneja empates sin ValueError)
         ranks: list[int] = []
         for j in range(n_j):
             col_vals = [
@@ -156,7 +157,6 @@ def load_league_data(source_key: str, file_bytes: bytes):
             if not col_vals:
                 continue
             s_ranks = pd.Series(col_vals, dtype="float64").rank(ascending=False, method="min")
-            # Busca el índice correspondiente a played_pts[j]
             match_idx = next(
                 (i_v for i_v, v_c in enumerate(col_vals) if np.isclose(v_c, played_pts[j])),
                 None,
@@ -252,25 +252,73 @@ if df_cls.empty or df_pts_j.empty:
 
 current_round = int(df_cls["Jornadas"].max())
 rem_rounds = max(0, TOTAL_ROUNDS - current_round)
+all_managers = df_cls["Mánager"].tolist()
+all_rounds = df_pts_j.columns.tolist()
 
-st.sidebar.header("Filtros de análisis")
+# --- FILTROS MEJORADOS EN SIDEBAR ---
+st.sidebar.header("🎛️ Filtros de análisis")
+
+# 1. Filtro de mánagers con botones rápidos
+if "mgr_filter" not in st.session_state or set(st.session_state["mgr_filter"]) - set(all_managers):
+    st.session_state["mgr_filter"] = all_managers.copy()
+
+b_all, b_none = st.sidebar.columns(2)
+if b_all.button("Todos", width="stretch"):
+    st.session_state["mgr_filter"] = all_managers.copy()
+if b_none.button("Limpiar", width="stretch"):
+    st.session_state["mgr_filter"] = []
+
 selected_managers = st.sidebar.multiselect(
-    "Seleccionar mánagers",
-    options=df_cls["Mánager"].tolist(),
-    default=df_cls["Mánager"].tolist(),
+    "Mánagers",
+    options=all_managers,
+    key="mgr_filter",
 )
 if not selected_managers:
-    selected_managers = df_cls["Mánager"].tolist()
+    st.sidebar.caption("Mostrando todos los mánagers por defecto.")
+    active_managers = all_managers
+else:
+    active_managers = selected_managers
 
-all_rounds = df_pts_j.columns.tolist()
-selected_rounds = st.sidebar.multiselect(
-    "Jornadas a mostrar",
-    options=all_rounds,
-    default=all_rounds,
+st.sidebar.divider()
+
+# 2. Filtro de jornadas con presets + rango + detalle
+preset = st.sidebar.radio(
+    "Tramo rápido de jornadas",
+    options=["Todas", "Últimas 3J", "Últimas 5J", "Rango / Manual"],
+    horizontal=True,
+    index=0,
 )
-if not selected_rounds:
-    selected_rounds = all_rounds
 
+if preset == "Todas":
+    active_rounds = all_rounds
+elif preset == "Últimas 3J":
+    active_rounds = all_rounds[-3:]
+elif preset == "Últimas 5J":
+    active_rounds = all_rounds[-5:]
+else:
+    round_nums = [int(r[1:]) for r in all_rounds]
+    if len(round_nums) >= 2:
+        r_start, r_end = st.sidebar.slider(
+            "Rango de jornadas",
+            min_value=min(round_nums),
+            max_value=max(round_nums),
+            value=(min(round_nums), max(round_nums)),
+        )
+        range_rounds = [f"J{n}" for n in range(r_start, r_end + 1) if f"J{n}" in all_rounds]
+    else:
+        range_rounds = all_rounds
+
+    active_rounds = st.sidebar.multiselect(
+        "Ajuste fino de jornadas",
+        options=all_rounds,
+        default=range_rounds,
+    )
+    if not active_rounds:
+        active_rounds = range_rounds
+
+st.sidebar.caption(f"Jornadas activas: **{', '.join(active_rounds)}**")
+
+# --- RESUMEN SUPERIOR (KPIs) ---
 leader = df_cls.iloc[0]
 top_ga = df_cls.sort_values("G+A", ascending=False).iloc[0]
 most_consistent = df_cls.sort_values("CV", ascending=True).iloc[0]
@@ -283,47 +331,104 @@ k3.metric("Mejor racha (3J)", hottest["Mánager"], f"{hottest['Últ. 3J']} media
 k4.metric("Más regular (CV)", most_consistent["Mánager"], f"CV {most_consistent['CV']}")
 k5.metric("Top G+A", top_ga["Mánager"], f"{top_ga['G+A']} contribuciones")
 
-tab1, tab2, tab3, tab4 = st.tabs(
-    ["🏆 Clasificación y Métricas", "📈 Evolución por Jornada", "🎯 Proyección J17", "🕵️ Ficha por Mánager"]
+# --- PESTAÑAS ---
+tab_vis, tab_evo, tab_reg, tab_proj, tab_mgr = st.tabs(
+    [
+        "🏆 Visión General",
+        "📈 Evolución por Jornada",
+        "📊 Regularidad y Capitán",
+        "🎯 Proyección J17",
+        "🕵️ Ficha por Mánager",
+    ]
 )
 
-with tab1:
-    view_cls = df_cls[df_cls["Mánager"].isin(selected_managers)]
-    st.dataframe(view_cls, width="stretch", hide_index=True)
+# 1. VISIÓN GENERAL (Limpia y visual: solo métricas solicitadas)
+with tab_vis:
+    overview_cols = [
+        "Pos",
+        "Mánager",
+        "Dif. Líder",
+        "Puntos Totales",
+        "Goles",
+        "Asistencias",
+        "PaC",
+        "Pos. Media",
+        "Máxima",
+        "Mínima",
+    ]
+    view_vis = df_cls[df_cls["Mánager"].isin(active_managers)][overview_cols]
+
+    st.dataframe(
+        view_vis,
+        width="stretch",
+        hide_index=True,
+        column_config={
+            "Puntos Totales": st.column_config.ProgressColumn(
+                "Puntos Totales",
+                min_value=0,
+                max_value=max(int(df_cls["Puntos Totales"].max()), 1),
+                format="%d",
+            ),
+            "PaC": st.column_config.NumberColumn("PaC", help="Porterías a cero"),
+        },
+    )
 
     c_left, c_right = st.columns(2)
+
     with c_left:
+        bar_df = view_vis.sort_values("Puntos Totales", ascending=True)
         fig_bar = px.bar(
-            view_cls.sort_values("Puntos Totales", ascending=True),
+            bar_df,
             x="Puntos Totales",
             y="Mánager",
             orientation="h",
             text="Puntos Totales",
-            color="Media / J",
+            color="Puntos Totales",
             color_continuous_scale="Tealgrn",
-            title=f"Puntos Totales Acumulados (J1–J{current_round})",
+            title=f"Puntos Totales (J1–J{current_round})",
         )
         fig_bar.update_traces(textposition="outside", cliponaxis=False)
-        fig_bar.update_layout(height=420, margin=dict(l=10, r=45, t=45, b=10))
+        fig_bar.update_layout(
+            height=400,
+            coloraxis_showscale=False,
+            margin=dict(l=10, r=45, t=45, b=10),
+        )
         st.plotly_chart(fig_bar, width="stretch")
 
     with c_right:
-        fig_scatter = px.scatter(
-            view_cls,
-            x="Media / J",
-            y="CV",
-            size="Top 3 J",
-            color="Mánager",
-            text="Mánager",
-            title="Regularidad vs. Rendimiento Medio (menor CV = más constante)",
-            labels={"CV": "Coeficiente de Variación (DE / Media)"},
+        range_df = view_vis.sort_values("Máxima", ascending=True)
+        fig_mm = go.Figure()
+        fig_mm.add_trace(
+            go.Bar(
+                name="Máxima",
+                y=range_df["Mánager"],
+                x=range_df["Máxima"],
+                orientation="h",
+                text=range_df["Máxima"],
+                textposition="outside",
+            )
         )
-        fig_scatter.update_traces(textposition="top center")
-        fig_scatter.update_layout(height=420, showlegend=False, margin=dict(l=10, r=20, t=45, b=10))
-        st.plotly_chart(fig_scatter, width="stretch")
+        fig_mm.add_trace(
+            go.Bar(
+                name="Mínima",
+                y=range_df["Mánager"],
+                x=range_df["Mínima"],
+                orientation="h",
+                text=range_df["Mínima"],
+                textposition="outside",
+            )
+        )
+        fig_mm.update_layout(
+            barmode="group",
+            height=400,
+            title="Puntuación Máxima vs. Mínima por Mánager",
+            margin=dict(l=10, r=45, t=45, b=10),
+        )
+        st.plotly_chart(fig_mm, width="stretch")
 
-with tab2:
-    sub_pts = df_pts_j.loc[selected_managers, selected_rounds]
+# 2. EVOLUCIÓN POR JORNADA
+with tab_evo:
+    sub_pts = df_pts_j.loc[active_managers, active_rounds]
     df_melt = sub_pts.reset_index().melt(
         id_vars="Mánager",
         var_name="Jornada",
@@ -351,11 +456,61 @@ with tab2:
     fig_heat.update_layout(height=380)
     st.plotly_chart(fig_heat, width="stretch")
 
-with tab3:
+# 3. REGULARIDAD Y CAPITÁN (Métricas avanzadas)
+with tab_reg:
+    deep_cols = [
+        "Pos",
+        "Mánager",
+        "Media / J",
+        "Mediana / J",
+        "DE",
+        "CV",
+        "Últ. 3J",
+        "Bonus Cap.",
+        "Sin Cap.",
+        "Pts / (G+A)",
+        "Victorias J",
+        "Top 3 J",
+    ]
+    view_deep = df_cls[df_cls["Mánager"].isin(active_managers)][deep_cols]
+    st.dataframe(view_deep, width="stretch", hide_index=True)
+
+    r_left, r_right = st.columns(2)
+    with r_left:
+        fig_scatter = px.scatter(
+            view_deep,
+            x="Media / J",
+            y="CV",
+            size="Top 3 J",
+            color="Mánager",
+            text="Mánager",
+            title="Regularidad (CV) vs. Media por Jornada",
+            labels={"CV": "Coeficiente de Variación (menor = más regular)"},
+        )
+        fig_scatter.update_traces(textposition="top center")
+        fig_scatter.update_layout(height=400, showlegend=False, margin=dict(l=10, r=20, t=45, b=10))
+        st.plotly_chart(fig_scatter, width="stretch")
+
+    with r_right:
+        cap_df = view_deep.sort_values("Bonus Cap.", ascending=True)
+        fig_cap = px.bar(
+            cap_df,
+            x="Bonus Cap.",
+            y="Mánager",
+            orientation="h",
+            text="Bonus Cap.",
+            title="Bonus Neto de Capitán por Mánager",
+        )
+        fig_cap.update_traces(textposition="outside", cliponaxis=False)
+        fig_cap.update_layout(height=400, margin=dict(l=10, r=45, t=45, b=10))
+        st.plotly_chart(fig_cap, width="stretch")
+
+# 4. PROYECCIÓN J17
+with tab_proj:
     if rem_rounds == 0:
         st.info(f"Se han completado las {TOTAL_ROUNDS} jornadas; las proyecciones coinciden con los puntos finales.")
 
-    view_proj = df_cls[df_cls["Mánager"].isin(selected_managers)].copy()
+    view_proj = df_cls[df_cls["Mánager"].isin(active_managers)].copy()
     proj_long = view_proj.melt(
         id_vars=["Mánager"],
         value_vars=["Puntos Totales", "Proy. Media J17", "Proy. Forma J17"],
@@ -375,14 +530,16 @@ with tab3:
     st.plotly_chart(fig_proj, width="stretch")
 
     st.dataframe(
-        view_proj[["Pos", "Mánager", "Puntos Totales", "Media / J", "Últ. 3J", "Proy. Media J17", "Proy. Forma J17"]],
+        view_proj[
+            ["Pos", "Mánager", "Puntos Totales", "Media / J", "Últ. 3J", "Proy. Media J17", "Proy. Forma J17"]
+        ],
         width="stretch",
         hide_index=True,
     )
 
-with tab4:
-    manager_options = df_cls["Mánager"].tolist()
-    chosen = st.selectbox("Elige un mánager", options=manager_options)
+# 5. FICHA POR MÁNAGER
+with tab_mgr:
+    chosen = st.selectbox("Elige un mánager", options=all_managers)
     row = df_cls[df_cls["Mánager"] == chosen].iloc[0]
 
     m1, m2, m3, m4, m5, m6 = st.columns(6)
@@ -395,13 +552,13 @@ with tab4:
 
     r_cols = st.columns(3)
     with r_cols[0]:
-        s_pts = df_pts_j.loc[chosen, selected_rounds].rename("Puntos")
+        s_pts = df_pts_j.loc[chosen, active_rounds].rename("Puntos")
         fig_m = px.bar(s_pts, x=s_pts.index, y="Puntos", text_auto=True, title=f"Puntos por jornada — {chosen}")
         fig_m.update_layout(height=300, showlegend=False)
         st.plotly_chart(fig_m, width="stretch")
 
     with r_cols[1]:
-        s_cap = df_cap_j.loc[chosen, selected_rounds].rename("Capitán")
+        s_cap = df_cap_j.loc[chosen, active_rounds].rename("Capitán")
         fig_c = px.bar(
             s_cap,
             x=s_cap.index,
@@ -414,10 +571,12 @@ with tab4:
         st.plotly_chart(fig_c, width="stretch")
 
     with r_cols[2]:
-        df_of = pd.DataFrame({
-            "G+A": df_ga_j.loc[chosen, selected_rounds],
-            "PaC": df_pac_j.loc[chosen, selected_rounds],
-        })
+        df_of = pd.DataFrame(
+            {
+                "G+A": df_ga_j.loc[chosen, active_rounds],
+                "PaC": df_pac_j.loc[chosen, active_rounds],
+            }
+        )
         fig_o = px.bar(df_of, x=df_of.index, y=["G+A", "PaC"], barmode="group", title=f"Ofensiva (G+A) y PaC — {chosen}")
         fig_o.update_layout(height=300)
         st.plotly_chart(fig_o, width="stretch")
