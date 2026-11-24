@@ -1,7 +1,6 @@
-from datetime import datetime
 from io import BytesIO
-import json
 from pathlib import Path
+import re
 import numpy as np
 import pandas as pd
 import plotly.express as px
@@ -30,7 +29,6 @@ COL_ROUNDS_START = 8
 COL_ROUNDS_END = 25  # slice [8:25] -> 17 jornadas
 
 APP_DIR = Path(__file__).resolve().parent
-HISTORY_FILE = APP_DIR / "donqui_resumenes_jornadas.json"
 
 
 def find_excel_file(filename: str) -> Path | None:
@@ -97,55 +95,47 @@ def _safe_int(val, default: int = 0) -> int:
     return int(round(f))
 
 
-def _normalize_round_key(label: str, fallback_round: int) -> str:
-    """Normaliza etiquetas como 'JORNADA 13', 'Jornada 13' o 'J13' a 'J13'."""
-    s = str(label).strip().upper()
-    digits = "".join(ch for ch in s if ch.isdigit())
-    if digits:
-        return f"J{int(digits)}"
-    return f"J{max(1, fallback_round)}"
+def _parse_round_header(text: str) -> tuple[str, str] | None:
+    """Detecta encabezados tipo 'JORNADA 13', 'Jornada 14' o 'J13'."""
+    s = str(text).strip()
+    m = re.fullmatch(r"(?:jornada|j)\s*(\d{1,2})", s, flags=re.IGNORECASE)
+    if m:
+        num = int(m.group(1))
+        return f"J{num}", f"JORNADA {num}"
+    return None
 
 
-def load_history_store() -> dict:
-    """Carga el historial persistido de resúmenes por jornada."""
-    default_store = {
-        "managers": {},
-        "general": {},
-        "updated_at": None,
-    }
-    if not HISTORY_FILE.exists():
-        return default_store
-    try:
-        data = json.loads(HISTORY_FILE.read_text(encoding="utf-8"))
-        if isinstance(data, dict):
-            data.setdefault("managers", {})
-            data.setdefault("general", {})
-            data.setdefault("updated_at", None)
-            return data
-    except Exception:
-        pass
-    return default_store
+def _extract_managers_summaries(df_mgr_sheet: pd.DataFrame, fallback_round: int) -> dict[str, dict[str, str]]:
+    """
+    Extrae resúmenes por jornada y mánager directamente desde la hoja 'Mánagers' del Excel.
+    Soporta tanto un único bloque (ej. 'JORNADA 13' arriba) como múltiples bloques de jornada.
+    Retorna: { "J13": { "Donqui": "...", ... }, ... }
+    """
+    summaries_by_round: dict[str, dict[str, str]] = {}
+    current_rk = f"J{max(1, fallback_round)}"
 
+    for r_i in range(len(df_mgr_sheet)):
+        c0 = df_mgr_sheet.iloc[r_i, 0] if df_mgr_sheet.shape[1] > 0 else None
+        c1 = df_mgr_sheet.iloc[r_i, 1] if df_mgr_sheet.shape[1] > 1 else None
 
-def save_history_store(store: dict) -> None:
-    """Guarda el historial de resúmenes en disco."""
-    store["updated_at"] = datetime.now().isoformat(timespec="seconds")
-    HISTORY_FILE.write_text(
-        json.dumps(store, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+        c0_str = str(c0).strip() if pd.notna(c0) else ""
+        c1_str = str(c1).strip() if pd.notna(c1) else ""
 
+        if not c0_str and not c1_str:
+            continue
 
-def sync_excel_summaries_to_history(excel_round_key: str, excel_mgr_summaries: dict[str, str]) -> dict:
-    """Sincroniza los resúmenes presentes en la hoja 'Mánagers' del Excel con el historial."""
-    store = load_history_store()
-    round_bucket = store["managers"].setdefault(excel_round_key, {})
-    for mgr_name, text in excel_mgr_summaries.items():
-        if text and text.strip():
-            if mgr_name not in round_bucket or round_bucket[mgr_name] != text.strip():
-                round_bucket[mgr_name] = text.strip()
-    save_history_store(store)
-    return store
+        # ¿Es un encabezado de jornada?
+        hdr = _parse_round_header(c0_str) if c0_str else None
+        if hdr and not c1_str:
+            current_rk = hdr[0]
+            summaries_by_round.setdefault(current_rk, {})
+            continue
+
+        # Fila de mánager + resumen
+        if c0_str and c1_str:
+            summaries_by_round.setdefault(current_rk, {})[c0_str] = c1_str
+
+    return summaries_by_round
 
 
 @st.cache_data(show_spinner="Cargando datos de Donqui League...")
@@ -315,35 +305,14 @@ def load_league_data(source_key: str, file_bytes: bytes):
     df_pac_j = pd.DataFrame.from_dict(pac_matrix, orient="index").reindex(index=df_cls["Mánager"], columns=present_cols)
 
     max_j_played = int(df_cls["Jornadas"].max()) if not df_cls.empty else 1
-    excel_round_label = f"JORNADA {max_j_played}"
-    excel_round_key = f"J{max_j_played}"
-    excel_mgr_summaries: dict[str, str] = {}
+    summaries_by_round: dict[str, dict[str, str]] = {}
 
     if "Mánagers" in sheet_names:
         bio.seek(0)
         df_mgr_sheet = pd.read_excel(bio, sheet_name="Mánagers", header=None)
-        if not df_mgr_sheet.empty and pd.notna(df_mgr_sheet.iloc[0, 0]):
-            header_val = str(df_mgr_sheet.iloc[0, 0]).strip()
-            if header_val:
-                excel_round_label = header_val
-                excel_round_key = _normalize_round_key(header_val, max_j_played)
+        summaries_by_round = _extract_managers_summaries(df_mgr_sheet, max_j_played)
 
-        for r_i in range(1, len(df_mgr_sheet)):
-            m_val = df_mgr_sheet.iloc[r_i, 0]
-            txt_val = df_mgr_sheet.iloc[r_i, 1] if df_mgr_sheet.shape[1] > 1 else None
-            if pd.notna(m_val) and str(m_val).strip() and pd.notna(txt_val) and str(txt_val).strip():
-                excel_mgr_summaries[str(m_val).strip()] = str(txt_val).strip()
-
-    return (
-        df_cls,
-        df_pts_j,
-        df_cap_j,
-        df_ga_j,
-        df_pac_j,
-        excel_round_key,
-        excel_round_label,
-        excel_mgr_summaries,
-    )
+    return df_cls, df_pts_j, df_cap_j, df_ga_j, df_pac_j, summaries_by_round
 
 
 st.title("⚽ Donqui League — Centro Analítico")
@@ -372,22 +341,13 @@ else:
     file_bytes = uploaded_file.getvalue()
     source_key = f"upload::{uploaded_file.name}::{len(file_bytes)}"
 
-(
-    df_cls,
-    df_pts_j,
-    df_cap_j,
-    df_ga_j,
-    df_pac_j,
-    excel_round_key,
-    excel_round_label,
-    excel_mgr_summaries,
-) = load_league_data(source_key, file_bytes)
+df_cls, df_pts_j, df_cap_j, df_ga_j, df_pac_j, summaries_by_round = load_league_data(
+    source_key, file_bytes
+)
 
 if df_cls.empty or df_pts_j.empty:
     st.info("El archivo se cargó, pero no hay datos de jornadas registrados todavía.")
     st.stop()
-
-history_store = sync_excel_summaries_to_history(excel_round_key, excel_mgr_summaries)
 
 current_round = int(df_cls["Jornadas"].max())
 rem_rounds = max(0, TOTAL_ROUNDS - current_round)
@@ -678,33 +638,27 @@ with tab_proj:
         hide_index=True,
     )
 
-# 5. FICHA POR MÁNAGER
+# 5. FICHA POR MÁNAGER (Integra resumen leído desde el Excel)
 with tab_mgr:
     chosen = st.selectbox("Elige un mánager", options=all_managers)
     row = df_cls[df_cls["Mánager"] == chosen].iloc[0]
 
-    mgr_hist_rounds = sorted(
-        [rk for rk, m_map in history_store.get("managers", {}).items() if chosen in m_map and m_map[chosen].strip()],
-        key=lambda x: int("".join(ch for ch in x if ch.isdigit()) or 0),
+    ordered_summary_rounds = sorted(
+        [rk for rk, m_map in summaries_by_round.items() if chosen in m_map],
+        key=lambda x: int(re.sub(r"\D", "", x) or 0),
     )
 
-    latest_summary = excel_mgr_summaries.get(chosen)
-    latest_label = excel_round_label
-    if not latest_summary and mgr_hist_rounds:
-        last_rk = mgr_hist_rounds[-1]
-        latest_summary = history_store["managers"][last_rk][chosen]
-        latest_label = f"JORNADA {last_rk[1:]}"
+    if ordered_summary_rounds:
+        last_rk = ordered_summary_rounds[-1]
+        st.markdown(f"### 🗞️ Resumen — {chosen} (JORNADA {re.sub(r'\\D', '', last_rk)})")
+        st.info(summaries_by_round[last_rk][chosen])
 
-    if latest_summary:
-        st.markdown(f"### 🗞️ Resumen — {chosen} ({latest_label})")
-        st.info(latest_summary)
+        if len(ordered_summary_rounds) > 1:
+            with st.expander(f"Evolución en la hoja 'Mánagers' para {chosen} ({len(ordered_summary_rounds)} jornadas)"):
+                for rk in reversed(ordered_summary_rounds):
+                    st.markdown(f"**JORNADA {re.sub(r'\\D', '', rk)}:** {summaries_by_round[rk][chosen]}")
     else:
-        st.caption(f"No hay resumen registrado todavía para **{chosen}**.")
-
-    if len(mgr_hist_rounds) > 1:
-        with st.expander(f"Ver evolución histórica de resúmenes de {chosen} ({len(mgr_hist_rounds)} jornadas)"):
-            for rk in reversed(mgr_hist_rounds):
-                st.markdown(f"**Jornada {rk[1:]}:** {history_store['managers'][rk][chosen]}")
+        st.caption(f"No hay resumen en la hoja 'Mánagers' del Excel para **{chosen}**.")
 
     m1, m2, m3, m4, m5, m6 = st.columns(6)
     m1.metric("Puesto", f"#{int(row['Pos'])}")
@@ -745,86 +699,30 @@ with tab_mgr:
         fig_o.update_layout(height=300)
         st.plotly_chart(fig_o, width="stretch")
 
-# 6. RESÚMENES POR JORNADA
+# 6. RESÚMENES POR JORNADA (Directamente desde la hoja 'Mánagers' del Excel)
 with tab_res:
-    st.subheader("Evolución y registro de resúmenes por jornada")
+    st.subheader("Resúmenes por jornada (hoja 'Mánagers' del Excel)")
     st.caption(
-        "Los resúmenes de la hoja 'Mánagers' del Excel se sincronizan automáticamente por jornada "
-        "(desde J13 en adelante). Aquí puedes consultar el histórico completo o añadir/editar resúmenes."
+        "Se leen directamente desde la hoja **Mánagers** del archivo Excel. "
+        "A medida que vayas añadiendo resúmenes de nuevas jornadas en esa hoja, aparecerán aquí automáticamente."
     )
 
-    available_hist_rounds = sorted(
-        set(list(history_store.get("managers", {}).keys()) + list(history_store.get("general", {}).keys())),
-        key=lambda x: int("".join(ch for ch in x if ch.isdigit()) or 0),
+    ordered_rounds_all = sorted(
+        summaries_by_round.keys(),
+        key=lambda x: int(re.sub(r"\D", "", x) or 0),
     )
 
-    default_r_idx = 0
-    if excel_round_key in available_hist_rounds:
-        default_r_idx = available_hist_rounds.index(excel_round_key)
-
-    st.markdown("#### 1. Consultar evolución por jornada")
-    if available_hist_rounds:
-        selected_hist_round = st.selectbox(
-            "Selecciona una jornada guardada",
-            options=available_hist_rounds,
-            index=default_r_idx,
-            format_func=lambda k: f"Jornada {k[1:]}",
+    if ordered_rounds_all:
+        selected_sum_round = st.selectbox(
+            "Jornada a consultar",
+            options=ordered_rounds_all,
+            index=len(ordered_rounds_all) - 1,
+            format_func=lambda rk: f"JORNADA {re.sub(r'\\D', '', rk)}",
         )
+        mgr_map = summaries_by_round.get(selected_sum_round, {})
 
-        gen_txt = history_store.get("general", {}).get(selected_hist_round, "")
-        if gen_txt:
-            st.markdown(f"**Resumen general — Jornada {selected_hist_round[1:]}**")
-            st.success(gen_txt)
-
-        mgr_map = history_store.get("managers", {}).get(selected_hist_round, {})
-        st.markdown(f"**Resúmenes individuales — Jornada {selected_hist_round[1:]}**")
         for m_name in all_managers:
             if m_name in active_managers and m_name in mgr_map:
-                st.markdown(f"- **{m_name}:** {mgr_map[m_name]}")
+                st.markdown(f"**{m_name}:** {mgr_map[m_name]}")
     else:
-        st.info("Todavía no hay resúmenes guardados en el historial.")
-
-    st.divider()
-    st.markdown("#### 2. Añadir o actualizar resumen de una jornada")
-    edit_round_num = st.number_input(
-        "Número de jornada",
-        min_value=1,
-        max_value=TOTAL_ROUNDS,
-        value=max(13, current_round),
-        step=1,
-    )
-    edit_rk = f"J{int(edit_round_num)}"
-
-    existing_gen = history_store.get("general", {}).get(edit_rk, "")
-    new_gen = st.text_area(
-        f"Resumen general de {edit_rk} (opcional)",
-        value=existing_gen,
-        height=90,
-        placeholder=f"Escribe aquí un resumen global de lo ocurrido en {edit_rk}...",
-    )
-
-    edit_mgr = st.selectbox("Mánager para editar/añadir resumen", options=all_managers, key="edit_mgr_sel")
-    existing_mgr_txt = history_store.get("managers", {}).get(edit_rk, {}).get(edit_mgr, "")
-    new_mgr_txt = st.text_area(
-        f"Resumen de {edit_mgr} en {edit_rk}",
-        value=existing_mgr_txt,
-        height=110,
-        placeholder=f"Escribe o pega el resumen de {edit_mgr} para {edit_rk}...",
-    )
-
-    if st.button("💾 Guardar resumen en historial", width="stretch"):
-        updated = load_history_store()
-        if new_gen.strip():
-            updated["general"][edit_rk] = new_gen.strip()
-        elif edit_rk in updated["general"]:
-            del updated["general"][edit_rk]
-
-        updated["managers"].setdefault(edit_rk, {})
-        if new_mgr_txt.strip():
-            updated["managers"][edit_rk][edit_mgr] = new_mgr_txt.strip()
-        elif edit_mgr in updated["managers"][edit_rk]:
-            del updated["managers"][edit_rk][edit_mgr]
-
-        save_history_store(updated)
-        st.success(f"Resumen de {edit_rk} guardado correctamente.")
-        st.rerun()
+        st.info("No se encontraron resúmenes en la hoja 'Mánagers' del Excel.")
