@@ -9,7 +9,7 @@ import plotly.graph_objects as go
 import streamlit as st
 
 st.set_page_config(
-    page_title="Donqui League — Analytics",
+    page_title="Donqui League A — Analytics",
     page_icon="⚽",
     layout="wide",
     initial_sidebar_state="expanded",
